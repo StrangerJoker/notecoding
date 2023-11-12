@@ -1,4 +1,4 @@
-# MyBatis 框架
+﻿# MyBatis 框架
 
 # 第一章 框架的概述
 
@@ -260,17 +260,17 @@ rollback：回顾事务
 
 创建模版的步骤：
 
-![image-20201019094212830](images/image-20201019094212830.png)	
+[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-ESVCUYOW-1660458252157)(images/image-20201019094212830.png)]	
 
 
 
 创建模版文件：
 
-![image-20201019094359625](images/image-20201019094359625.png)	
+[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-hMaU51Go-1660458252158)(images/image-20201019094359625.png)]	
 
 创建文件选择使用的模版：
 
-![image-20201019094616208](images/image-20201019094616208.png)	
+[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-zkFLYMWJ-1660458252158)(images/image-20201019094616208.png)]	
 
 
 
@@ -924,7 +924,7 @@ public void testLikeTwo(){
 
 什么时候使用动态sql：
 
-![image-20201020114831474](images/image-20201020114831474.png)	
+[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-iJYVGOny-1660458252159)(images/image-20201020114831474.png)]	
 
 
 
@@ -933,7 +933,6 @@ public void testLikeTwo(){
 语法：
 
 ```xml
-
 <if test="boolean判断结果">
    sql 代码
 </if>
@@ -1451,4 +1450,5 @@ PageHelper做数据分页。 在你的select语句后面加入 分页的 sql 内
 `SELECT count(0) FROM student `
 
 `select * from student order by id LIMIT ? `
+
 
