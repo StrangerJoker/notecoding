@@ -175,11 +175,35 @@ esac
 - 从Topic拉取消息：`bin/kafka-console-consumer.sh --bootstrap-server hadoop2:9092 --topic first`
 - 从Topic拉取所有消息（包括历史）：`bin/kafka-console-consumer.sh --bootstrap-server 192.168.102.131:9092 --from-beginning --topic first`
 
+### 1.3. Kafka工作流程以及文件存储机制
+
+
+
+![](./pic/0009.png)
+
+Kafka 中消息是以 topic 进行分类的，生产者生产消息，消费者消费消息，都是面向 topic 的。
+
+**topic** 是**逻辑**上的概念，而 **partition** 是物理上的概念，每个 **partition** 对应于一个 **log 文 件**，该 log 文件中存储的就是 producer 生产的数据。。Producer 生产的数据会被不断追加到该 log 文件末端，且每条数据都有自己的 **offset**。
+
+消费者组中的每个消费者，都会实时记录自己 消费到了哪个 offset，以便出错恢复时，从上次的位置继续消费。
+
+![](./pic/0010.png)
+
+由于生产者生产的消息会不断追加到 log 文件末尾，为防止 log 文件过大导致数据定位 效率低下，Kafka 采取了**分片和索引机制**，将每个 partition 分为多个 segment。每个 segment 对应两个文件——**“.index”文件**和**“.log”文件**。这些文件位于一个文件夹下，该文件夹的命名 规则为：topic 名称+分区序号。例如，first 这个 topic 有三个分区，则其对应的文件夹为 first0,first-1,first-2。
+
+![](./pic/0011.png)
+
+**index 和 log 文件以当前 segment 的第一条消息的 offset 命名**。下图为 index 文件和 log 文件的结构示意图。
+
+![](./pic/0012.png)
+
+**“.index”文件存储大量的索引信息，“.log”文件存储大量的数据**，索引文件中的元数据指向对应数据文件中 message 的物理偏移地址。
+
 ## 2. Kafka Producer
 
 ### 2.1. 生产者 消息发送流程
 
-![](.\pic\0002.JPG)
+![](./pic/0002.JPG)
 
 **重要参数解释：**
 
@@ -196,9 +220,23 @@ esac
 
 - 在消息发送的过程中，涉及到了两个线程——<font color="red">**main 线程**</font>和<font color="red"> **Sender 线程**</font>。在 main 线程 中创建了一个**双端队列 RecordAccumulator**。
 
-- main 线程将消息发送给 RecordAccumulator， Sender 线程不断从 RecordAccumulator 中拉取消息发送到 Kafka Broker。
+- main 线程将消息发送给 `RecordAccumulator`， Sender 线程不断从 `RecordAccumulator` 中拉取消息发送到 Kafka Broker。
 
 #### 2.1.2. 生产者重要参数
+
+| 参数名称                              | 描述                                                         |
+| ------------------------------------- | ------------------------------------------------------------ |
+| bootstrap.servers                     | 生产者连接集群所需的 broker 地 址 清 单 。 例 如 hadoop102:9092,hadoop103:9092,hadoop104:9092，可以 设置 1 个或者多个，中间用逗号隔开 |
+| key.serializer 和 value.serializer    | 指定发送消息的 key 和 value 的序列化类型。一定要写 全类名    |
+| buffer.memory                         | RecordAccumulator 缓冲区总大小，默认 32m。                   |
+| batch.size                            | **缓冲区一批数据最大值**，**默认 16k**。适当增加该值，可 以提高吞吐量，但是如果该值设置太大，会导致数据 传输延迟增加。 |
+| linger.ms                             | 如果数据迟迟未达到 batch.size，sender 等待 linger.time 之后就会发送数据。单位 ms，**默认值是 0ms**，表示没 有延迟。生产环境建议该值大小为 5-100ms 之间。 |
+| acks                                  | 0：生产者发送过来的数据，不需要等数据落盘应答。<br /> 1：生产者发送过来的数据，Leader 收到数据后应答。<br /> -1（all）：生产者发送过来的数据，Leader+和 isr 队列 里面的所有节点收齐数据后应答。<br />默认值是-1，-1 和 all 是等价的。 |
+| max.in.flight.requests.per.connection | 允许最多没有返回 ack 的次数，默认为 5，开启幂等性 要保证该值是 1-5 的数字。 |
+| retries                               | 当消息发送出现错误的时候，系统会重发消息。**retries 表示重试次数**。默认是 int 最大值，2147483647。 如果设置了重试，还想保证消息的有序性，需要设置 MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION=1 ,否则在重试此失败消息的时候，其他的消息可能发送 成功了。 |
+| retry.backoff.ms                      | 两次重试之间的时间间隔，默认是 100ms。                       |
+| enable.idempotence                    | 是否开启**幂等性**，默认 true，开启幂等性。                  |
+| compression.type                      | 生产者发送的所有数据的压缩方式。默认是 none，也就是不压缩。<br /> 支持压缩类型：none、gzip、snappy、lz4 和 zstd。 |
 
 ### 2.2. 发送的API
 
@@ -243,8 +281,6 @@ public class Consumer1 {
     }
 }
 ```
-
-
 
 ### 2.3. 同步发送API
 
@@ -293,11 +329,7 @@ public class Consumer1 {
 }
 ```
 
-
-
 ### 2.4. 生产者分区
-
-
 
 #### 2.4.1. 分区好处
 
