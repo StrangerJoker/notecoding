@@ -1791,13 +1791,233 @@ stream.keyBy(...)
 
 ##### 5.3.3.1.生成总体原则
 
-
+乱序数据：需要考虑准确性和时延。
 
 ##### 5.3.3.2.生成策略
 
+在Flink中，调用流的`.assignTimestampsAndWatermarks()`方法为流数据分配时间戳，生成水位线。`
+
+```java
+DataStream<Event> stream = env.addSource(new ClickSource());
+
+DataStream<Event> withTimestampsAndWatermarks = 
+stream.assignTimestampsAndWatermarks(<watermark strategy>);
+```
+
+`WatermarkStrategy`作为参数，这就是所谓的“水位线生成策略”。`WatermarkStrategy`是一个接口，该接口中包含了一个“时间戳分配器”`TimestampAssigner`和一个“水位线生成器”`WatermarkGenerator`。
+
+```java
+public interface WatermarkStrategy<T> 
+    extends TimestampAssignerSupplier<T>,
+            WatermarkGeneratorSupplier<T>{
+
+    // 负责从流中数据元素的某个字段中提取时间戳，并分配给元素。时间戳的分配是生成水位线的基础。
+    @Override
+    TimestampAssigner<T> createTimestampAssigner(TimestampAssignerSupplier.Context context);
+
+    // 主要负责按照既定的方式，基于时间戳生成水位线
+    @Override
+    WatermarkGenerator<T> createWatermarkGenerator(WatermarkGeneratorSupplier.Context context);
+}
+```
+
+
+
 ##### 5.3.3.3.Flink内置水位线
 
+**有序流的内置水位线设置**：调用`WatermarkStrategy.forMonotonousTimestamps()`方法
+
+```java
+public class WatermarkMonoDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+        SingleOutputStreamOperator<WaterSensor> sensorDS = env
+                .socketTextStream("hadoop102", 7777)
+                .map(new WaterSensorMapFunction());
+
+        // TODO 1.定义Watermark策略
+        WatermarkStrategy<WaterSensor> watermarkStrategy = WatermarkStrategy
+                // 1.1 指定watermark生成：升序的watermark，没有等待时间
+                .<WaterSensor>forMonotonousTimestamps()
+                // 1.2 指定 时间戳分配器，从数据中提取
+                .withTimestampAssigner(new SerializableTimestampAssigner<WaterSensor>() {
+                    @Override
+                    public long extractTimestamp(WaterSensor element, long recordTimestamp) {
+                        // 返回的时间戳，要 毫秒
+                        System.out.println("数据=" + element + ",recordTs=" + recordTimestamp);
+                        return element.getTs() * 1000L;
+                    }
+                });
+
+        // TODO 2. 指定 watermark策略
+        SingleOutputStreamOperator<WaterSensor> sensorDSwithWatermark = sensorDS.assignTimestampsAndWatermarks(watermarkStrategy);
+
+
+        sensorDSwithWatermark.keyBy(sensor -> sensor.getId())
+                // TODO 3.使用 事件时间语义 的窗口
+                .window(TumblingEventTimeWindows.of(Time.seconds(10)))
+                .process(
+                        new ProcessWindowFunction<WaterSensor, String, String, TimeWindow>() {
+
+                            @Override
+                            public void process(String s, Context context, Iterable<WaterSensor> elements, Collector<String> out) throws Exception {
+                                long startTs = context.window().getStart();
+                                long endTs = context.window().getEnd();
+                                String windowStart = DateFormatUtils.format(startTs, "yyyy-MM-dd HH:mm:ss.SSS");
+                                String windowEnd = DateFormatUtils.format(endTs, "yyyy-MM-dd HH:mm:ss.SSS");
+
+                                long count = elements.spliterator().estimateSize();
+
+                                out.collect("key=" + s + "的窗口[" + windowStart + "," + windowEnd + ")包含" + count + "条数据===>" + elements.toString());
+                            }
+                        }
+                )
+                .print();
+
+        env.execute();
+    }
+}
+```
+
+
+
+**无序流的内置水位线设置**:调用`WatermarkStrategy.forBoundedOutOfOrderness()`,这个方法需要传入一个`maxOutOfOrderness`参数，表示“最大乱序程度”，它表示数据流中乱序数据时间戳的最大差值,就是窗口等待时间；
+
+```java
+public class WatermarkOutOfOrdernessDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+
+        SingleOutputStreamOperator<WaterSensor> sensorDS = env
+                .socketTextStream("hadoop102", 7777)
+                .map(new WaterSensorMapFunction());
+
+
+        // TODO 1.定义Watermark策略
+        WatermarkStrategy<WaterSensor> watermarkStrategy = WatermarkStrategy
+                // 1.1 指定watermark生成：乱序的，等待3s
+                .<WaterSensor>forBoundedOutOfOrderness(Duration.ofSeconds(3))
+                // 1.2 指定 时间戳分配器，从数据中提取
+                .withTimestampAssigner(
+                        (element, recordTimestamp) -> {
+                            // 返回的时间戳，要 毫秒
+                            System.out.println("数据=" + element + ",recordTs=" + recordTimestamp);
+                            return element.getTs() * 1000L;
+                        });
+
+        // TODO 2. 指定 watermark策略
+        SingleOutputStreamOperator<WaterSensor> sensorDSwithWatermark = sensorDS.assignTimestampsAndWatermarks(watermarkStrategy);
+
+
+        sensorDSwithWatermark.keyBy(sensor -> sensor.getId())
+                // TODO 3.使用 事件时间语义 的窗口
+                .window(TumblingEventTimeWindows.of(Time.seconds(10)))
+                .process(
+                        new ProcessWindowFunction<WaterSensor, String, String, TimeWindow>() {
+
+                            @Override
+                            public void process(String s, Context context, Iterable<WaterSensor> elements, Collector<String> out) throws Exception {
+                                long startTs = context.window().getStart();
+                                long endTs = context.window().getEnd();
+                                String windowStart = DateFormatUtils.format(startTs, "yyyy-MM-dd HH:mm:ss.SSS");
+                                String windowEnd = DateFormatUtils.format(endTs, "yyyy-MM-dd HH:mm:ss.SSS");
+
+                                long count = elements.spliterator().estimateSize();
+
+                                out.collect("key=" + s + "的窗口[" + windowStart + "," + windowEnd + ")包含" + count + "条数据===>" + elements.toString());
+                            }
+                        }
+                )
+                .print();
+
+        env.execute();
+    }
+}
+```
+
 ##### 5.3.3.4.自定义水位线生成器
+
+**周期性WM生成器**：周期性生成器一般是通过onEvent()观察判断输入的事件，而在onPeriodicEmit()里发出水位线。
+
+```java
+// 自定义水位线的产生
+public class CustomPeriodicWatermarkExample {
+
+    public static void main(String[] args) throws Exception {
+
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        env
+                .addSource(new ClickSource())
+                .assignTimestampsAndWatermarks(new CustomWatermarkStrategy())
+                .print();
+
+        env.execute();
+    }
+
+    public static class CustomWatermarkStrategy implements WatermarkStrategy<Event> {
+
+        @Override
+        public TimestampAssigner<Event> createTimestampAssigner(TimestampAssignerSupplier.Context context) {
+
+            return new SerializableTimestampAssigner<Event>() {
+
+                @Override
+                public long extractTimestamp(Event element，long recordTimestamp) {
+                    return element.timestamp; // 告诉程序数据源里的时间戳是哪一个字段
+                }
+            };
+        }
+
+        @Override
+        public WatermarkGenerator<Event> createWatermarkGenerator(WatermarkGeneratorSupplier.Context context) {
+            return new CustomBoundedOutOfOrdernessGenerator();
+        }
+    }
+
+    public static class CustomBoundedOutOfOrdernessGenerator implements WatermarkGenerator<Event> {
+
+        private Long delayTime = 5000L; // 延迟时间
+        private Long maxTs = -Long.MAX_VALUE + delayTime + 1L; // 观察到的最大时间戳
+
+        @Override
+        public void onEvent(Event event，long eventTimestamp，WatermarkOutput output) {
+            // 每来一条数据就调用一次
+            maxTs = Math.max(event.timestamp，maxTs); // 更新最大时间戳
+        }
+
+        @Override
+        public void onPeriodicEmit(WatermarkOutput output) {
+            // 发射水位线，默认200ms调用一次
+            output.emitWatermark(new Watermark(maxTs - delayTime - 1L));
+        }
+    }
+}
+```
+
+在`onPeriodicEmit()`里调用`output.emitWatermark()`，就可以发出水位线了；这个方法由系统框架周期性地调用，默认200ms一次。
+
+如果想修改默认周期时间，可以通过下面方法修改。例如：修改为400ms
+
+`env.getConfig().setAutoWatermarkInterval(400L)`;
+
+**断点式水位线生成器（Punctuated Generator）**
+
+断点式生成器会不停地检测`onEvent()`中的事件，当发现带有水位线信息的事件时，就立即发出水位线。我们把发射水位线的逻辑写在`onEvent`方法当中即可。
+
+**在数据源中发送水位线**
+
+我们也可以在自定义的数据源中抽取事件时间，然后发送水位线。这里要注意的是，在自定义数据源中发送了水位线以后，就不能再在程序中使用assignTimestampsAndWatermarks方法来生成水位线了。
+
+```java
+env.fromSource(
+kafkaSource, WatermarkStrategy.forBoundedOutOfOrderness(Duration.ofSeconds(3)), "kafkasource"
+)
+```
 
 #### 5.3.4.水位线传递
 
