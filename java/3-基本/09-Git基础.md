@@ -1,5 +1,19 @@
 # Git Demo
 
+## Git基本配置
+
+### 系统配置
+
+存放在git的安装目录下：`%Git%/etc/gitconfig`；若使用`git config --system`选项，读写就是这个文件
+
+### 用户配置
+
+存放在用户目录下，例如linux存放在`~/.gitconfig`；若使用`git config --global`选项，读写的就是这个文件
+
+### 仓库配置
+
+当前仓库的配置文件，也就是工作目录中的`.git/config`文件，若使用`git config --local`选项，读写的就是这个文件
+
 ## Git 新建仓库
 
 `git init`：在当前文件夹下新建一个git仓库，仓库名就是文件夹名

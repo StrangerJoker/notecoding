@@ -119,6 +119,201 @@ public class NacosDynamicConfig {
 }
 ```
 
+## 2.4.分布式配置管理
+
+### 2.4.1. 公共配置、应用配置以及扩展配置
+
+在项目开发中，开发人员经常利用配置信息优先级，来定义**公共配置**、**应用配置**和**扩展配置**。Spring Cloud Alibaba封装了Nacos Config，可以实现配置信息按照优先级加载。
+
+**优先级顺序为：公共配置 < 扩展配置 < 应用配置**
+
+#### 2.4.1.1. 按照优先级加载属性的原理
+
+（一）使用Spring Cloud的`PropertySourceBootstrapConfiguration`类触发属性的加载
+
+```java
+@Configuration(
+    proxyBeanMethods = false
+)
+@EnableConfigurationProperties({PropertySourceBootstrapProperties.class})
+public class PropertySourceBootstrapConfiguration implements ApplicationContextInitializer<ConfigurableApplicationContext>, Ordered {
+    public void initialize(ConfigurableApplicationContext applicationContext) {
+        List<PropertySource<?>> composite = new ArrayList();
+        // 排序属性资源加载器
+        AnnotationAwareOrderComparator.sort(this.propertySourceLocators);
+        boolean empty = true;
+        ConfigurableEnvironment environment = applicationContext.getEnvironment();
+        Iterator var5 = this.propertySourceLocators.iterator();
+
+        while(true) {
+            // 
+        }
+    }   
+    
+}
+```
+
+（二）用属性加载器`NacosPropertySourceLocator`加载
+
+```java
+@Order(0)
+public class NacosPropertySourceLocator implements PropertySourceLocator {
+    public PropertySource<?> locate(Environment env) {
+        this.nacosConfigProperties.setEnvironment(env);
+        ConfigService configService = this.nacosConfigManager.getConfigService();
+        if (null == configService) {
+            log.warn("no instance of config service found, can't load config from nacos");
+            return null;
+        } else {
+            long timeout = (long)this.nacosConfigProperties.getTimeout();
+            this.nacosPropertySourceBuilder = new NacosPropertySourceBuilder(configService, timeout);
+            String name = this.nacosConfigProperties.getName();
+            String dataIdPrefix = this.nacosConfigProperties.getPrefix();
+            if (StringUtils.isEmpty(dataIdPrefix)) {
+                dataIdPrefix = name;
+            }
+
+            if (StringUtils.isEmpty(dataIdPrefix)) {
+                dataIdPrefix = env.getProperty("spring.application.name");
+            }
+
+            CompositePropertySource composite = new CompositePropertySource("NACOS");
+            // 加载公共配置
+            this.loadSharedConfiguration(composite);
+            // 加载扩展配置
+            this.loadExtConfiguration(composite);
+            // 加载应用配置
+            this.loadApplicationConfiguration(composite, dataIdPrefix, this.nacosConfigProperties, env);
+            return composite;
+        }
+    }
+}
+```
+
+#### 2.4.1.2. 实践
+
+1、新建springboot工程，maven导入依赖：
+
+```xml
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-actuator</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.httpcomponents</groupId>
+            <artifactId>httpclient</artifactId>
+            <version>4.5.6</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-logging</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.httpcomponents</groupId>
+                    <artifactId>httpclient</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-dubbo</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-config</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-lang3</artifactId>
+        </dependency>
+    </dependencies>
+```
+
+2、编写`bootstrap.yaml`：
+
+```yaml
+dubbo:
+  scan:
+    base-packages: com.alibaba.cloud.youxia
+  protocol:
+    name: dubbo
+    port: -1
+spring:
+  application:
+    name: configuring-priorities-load-nacos
+  main:
+    allow-bean-definition-overriding: true
+  cloud:
+    nacos:
+      discovery:
+        server-addr: 127.0.0.1:8848
+        namespace: c7ba173f-29e5-4c58-ae78-b102be11c4f9
+        group: configuring-priorities-load-nacos
+      config:
+        server-addr: 127.0.0.1:8848
+        group: configuring-priorities-load-nacos
+        namespace: c7ba173f-29e5-4c58-ae78-b102be11c4f9
+        # 扩展配置
+        extension-configs:
+          - data-id: extension.yaml
+            group: configuring-priorities-load-nacos
+            refresh: true
+        # 共享配置
+        sharedConfigs:
+          - data-id: share.yaml
+            group: configuring-priorities-load-nacos
+            refresh: true
+        # 应用配置
+        name: configuring-priorities-load-nacos
+        file-extension: yaml
+```
+
+**三种配置优先级大于当前文件的配置信息**
+
+3、在nacos配置中心新增3个配置文件：
+
+- extension.yaml
+
+```yaml
+spring:
+  name: extensiontest
+```
+
+- share.yaml
+
+```yaml
+spring:
+  name: sharetest
+```
+
+- configuring-priorities-load-nacos
+
+```yaml
+spring:
+  name: applicationname
+```
+
+4、启动微服务，获取属性`spring.name`的值为 `applicationname`
+
+### 2.4.2. Nacos配置文件优先级
+
+
 
 # 3.微服务负载均衡
 
