@@ -2021,9 +2021,1004 @@ kafkaSource, WatermarkStrategy.forBoundedOutOfOrderness(Duration.ofSeconds(3)), 
 
 #### 5.3.4.水位线传递
 
+![](pic/0023.png)
+
+在流处理中，上游任务处理完水位线、时钟改变之后，要把当前的水位线再次发出，广播给所有的下游子任务。**而当一个任务接收到多个上游并行任务传递来的水位线时，应该以最小的那个作为当前任务的事件时钟。**
+
+```java
+public class WatermarkIdlenessDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        env.setParallelism(2);
+
+
+        // 自定义分区器：数据%分区数，只输入奇数，都只会去往map的一个子任务
+        SingleOutputStreamOperator<Integer> socketDS = env
+                .socketTextStream("hadoop102", 7777)
+                .partitionCustom(new MyPartitioner(), r -> r)
+                .map(r -> Integer.parseInt(r))
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<Integer>forMonotonousTimestamps()
+                                .withTimestampAssigner((r, ts) -> r * 1000L)
+                                .withIdleness(Duration.ofSeconds(5))  //空闲等待5s
+                );
+
+
+        // 分成两组： 奇数一组，偶数一组 ， 开10s的事件时间滚动窗口
+        socketDS
+                .keyBy(r -> r % 2)
+                .window(TumblingEventTimeWindows.of(Time.seconds(10)))
+                .process(new ProcessWindowFunction<Integer, String, Integer, TimeWindow>() {
+                    @Override
+                    public void process(Integer integer, Context context, Iterable<Integer> elements, Collector<String> out) throws Exception {
+                        long startTs = context.window().getStart();
+                        long endTs = context.window().getEnd();
+                        String windowStart = DateFormatUtils.format(startTs, "yyyy-MM-dd HH:mm:ss.SSS");
+                        String windowEnd = DateFormatUtils.format(endTs, "yyyy-MM-dd HH:mm:ss.SSS");
+
+                        long count = elements.spliterator().estimateSize();
+
+                        out.collect("key=" + integer + "的窗口[" + windowStart + "," + windowEnd + ")包含" + count + "条数据===>" + elements.toString());
+
+                    }
+                })
+                .print();
+
+
+        env.execute();
+    }
+}
+```
+
+
+
 #### 5.3.5.迟到数据的处理
 
+##### 5.3.5.1.推迟水印推进
+
+在水印产生时，设置一个乱序容忍度，推迟系统时间的推进，保证窗口计算被延迟执行，为乱序的数据争取更多的时间进入窗口。
+
+```java
+WatermarkStrategy.forBoundedOutOfOrderness(Duration.ofSeconds(10));
+```
+
+##### 5.3.5.2.设置窗口延迟关闭
+
+ Flink的窗口，也允许迟到数据。当触发了窗口计算后，会先计算当前的结果，但是此时并不会关闭窗口。
+
+以后每来一条迟到数据，就触发一次这条数据所在窗口计算(增量计算)。直到wartermark 超过了窗口结束时间+推迟时间，此时窗口会真正关闭。
+
+```java
+.window(TumblingEventTimeWindows.of(Time.seconds(5)))
+.allowedLateness(Time.seconds(3))
+```
+
+##### 5.3.5.3.用侧流接收迟到的数据
+
+在上述中添加``，使用测流接收迟到数据。
+
+```java
+.windowAll(TumblingEventTimeWindows.of(Time.seconds(5)))
+.allowedLateness(Time.seconds(3))
+.sideOutputLateData(lateWS)
+```
+
+```java
+public class WaterMarkLateDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+
+        SingleOutputStreamOperator<WaterSensor> sensorDS = env
+                .socketTextStream("hadoop102", 7777)
+                .map(new WaterSensorMapFunction());
+
+        WatermarkStrategy<WaterSensor> watermarkStrategy = WatermarkStrategy
+                .<WaterSensor>forBoundedOutOfOrderness(Duration.ofSeconds(3))
+                .withTimestampAssigner((element, recordTimestamp) -> element.getTs() * 1000L);
+
+        SingleOutputStreamOperator<WaterSensor> sensorDSwithWatermark = sensorDS.assignTimestampsAndWatermarks(watermarkStrategy);
+
+
+        OutputTag<WaterSensor> lateTag = new OutputTag<>("late-data", Types.POJO(WaterSensor.class));
+
+        SingleOutputStreamOperator<String> process = sensorDSwithWatermark.keyBy(sensor -> sensor.getId())
+                .window(TumblingEventTimeWindows.of(Time.seconds(10)))
+                .allowedLateness(Time.seconds(2)) // 推迟2s关窗
+                .sideOutputLateData(lateTag) // 关窗后的迟到数据，放入侧输出流
+                .process(
+                        new ProcessWindowFunction<WaterSensor, String, String, TimeWindow>() {
+
+                            @Override
+                            public void process(String s, Context context, Iterable<WaterSensor> elements, Collector<String> out) throws Exception {
+                                long startTs = context.window().getStart();
+                                long endTs = context.window().getEnd();
+                                String windowStart = DateFormatUtils.format(startTs, "yyyy-MM-dd HH:mm:ss.SSS");
+                                String windowEnd = DateFormatUtils.format(endTs, "yyyy-MM-dd HH:mm:ss.SSS");
+
+                                long count = elements.spliterator().estimateSize();
+
+                                out.collect("key=" + s + "的窗口[" + windowStart + "," + windowEnd + ")包含" + count + "条数据===>" + elements.toString());
+                            }
+                        }
+                );
+
+
+        process.print();
+        // 从主流获取侧输出流，打印
+        process.getSideOutput(lateTag).printToErr("关窗后的迟到数据");
+
+        env.execute();
+    }
+
+}
+```
+
+
+
 ### 5.4.基于时间的合流——双流联结（join）
+
+Flink中两条流的`connect`操作，就可以通过`keyBy`指定键进行分组后合并，实现了类似于SQL中的join操作；
+
+如果我们希望统计固定时间内两条流数据的匹配情况，那就需要自定义来实现——其实这完全可以用窗口（window）来表示。为了更方便地实现基于时间的合流操作，Flink的DataStrema API提供了内置的join算子。
+
+#### 5.4.1.窗口联结（window join）
+
+Flink为基于一段时间的双流合并专门提供了一个窗口联结算子，可以定义时间窗口，并将两条流中共享一个公共键（key）的数据放在窗口中进行配对处理。
+
+窗口联结在代码中的实现，首先需要调用`DataStream`的`.join()`方法来合并两条流，得到一个`JoinedStreams`；接着通过`.where()`和`.equalTo()`方法指定两条流中联结的`key`；然后通过`.window()`开窗口，并调用`.apply()`传入联结窗口函数进行处理计算。通用调用形式如下：
+
+```java
+stream1.join(stream2)
+        .where(<KeySelector>)
+        .equalTo(<KeySelector>)
+        .window(<WindowAssigner>)
+        .apply(<JoinFunction>)
+```
+
+`.where()`的参数是键选择器（`KeySelector`），用来指定第一条流中的`key`；而`.equalTo()`传入的`KeySelector`则指定了第二条流中的key。两者相同的元素，如果在同一窗口中，就可以匹配起来，并通过一个“联结函数”（`JoinFunction`）进行处理了。
+
+`.window()`传入的就是窗口分配器，之前讲到的三种时间窗口都可以用在这里：滚动窗口（tumbling window）、滑动窗口（sliding window）和会话窗口（session window）。
+
+调用`.apply()`可以看作实现了一个特殊的窗口函数。注意这里只能调用`.apply()`，没有其他替代的方法。
+
+传入的`JoinFunction`也是一个函数类接口，使用时需要实现内部的`.join()`方法。这个方法有两个参数，分别表示两条流中成对匹配的数据。
+
+而Flink中的`window join`，同样类似于`inner join`。也就是说，最后处理输出的，只有两条流中数据按key配对成功的那些；如果某个窗口中一条流的数据没有任何另一条流的数据匹配，那么就不会调用`JoinFunction`的`.join()`方法，也就没有任何输出了。
+
+**demo**:
+
+```java
+public class WindowJoinDemo {
+    public static void main(String[] args) throws Exception {
+
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+        SingleOutputStreamOperator<Tuple2<String, Integer>> ds1 = env
+                .fromElements(
+                        Tuple2.of("a", 1),
+                        Tuple2.of("a", 2),
+                        Tuple2.of("b", 3),
+                        Tuple2.of("c", 4)
+                )
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<Tuple2<String, Integer>>forMonotonousTimestamps()
+                                .withTimestampAssigner((value, ts) -> value.f1 * 1000L)
+                );
+
+
+        SingleOutputStreamOperator<Tuple3<String, Integer,Integer>> ds2 = env
+                .fromElements(
+                        Tuple3.of("a", 1,1),
+                        Tuple3.of("a", 11,1),
+                        Tuple3.of("b", 2,1),
+                        Tuple3.of("b", 12,1),
+                        Tuple3.of("c", 14,1),
+                        Tuple3.of("d", 15,1)
+                )
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<Tuple3<String, Integer,Integer>>forMonotonousTimestamps()
+                                .withTimestampAssigner((value, ts) -> value.f1 * 1000L)
+                );
+
+        // TODO window join
+        // 1. 落在同一个时间窗口范围内才能匹配
+        // 2. 根据keyby的key，来进行匹配关联
+        // 3. 只能拿到匹配上的数据，类似有固定时间范围的inner join
+        DataStream<String> join = ds1.join(ds2)
+                .where(r1 -> r1.f0)  // ds1的keyby
+                .equalTo(r2 -> r2.f0) // ds2的keyby
+                .window(TumblingEventTimeWindows.of(Time.seconds(10)))
+                .apply(new JoinFunction<Tuple2<String, Integer>, Tuple3<String, Integer, Integer>, String>() {
+                    /**
+                     * 关联上的数据，调用join方法
+                     * @param first  ds1的数据
+                     * @param second ds2的数据
+                     * @return
+                     * @throws Exception
+                     */
+                    @Override
+                    public String join(Tuple2<String, Integer> first, Tuple3<String, Integer, Integer> second) throws Exception {
+                        return first + "<----->" + second;
+                    }
+                });
+
+        join.print();
+
+        env.execute();
+    }
+}
+```
+
+
+
+#### 5.4.2.间隔联结（interval join）
+
+**间隔联结的思路**就是针对一条流的每个数据，开辟出其时间戳前后的一段时间间隔，看这期间是否有来自另一条流的数据匹配。
+
+**原理**：给定两个时间点，分别叫作间隔的“上界”（`upperBound`）和“下界”（`lowerBound`）；于是对于一条流（不妨叫作A）中的任意一个数据元素a，就可以开辟一段时间间隔：`[a.timestamp + lowerBound, a.timestamp + upperBound]`,即以a的时间戳为中心，下至下界点、上至上界点的一个闭区间：我们就把这段时间作为可以匹配另一条流数据的“窗口”范围。所以对于另一条流（不妨叫B）中的数据元素b，如果它的时间戳落在了这个区间范围内，a和b就可以成功配对，进而进行计算输出结果。所以匹配的条件为：
+
+`a.timestamp + lowerBound <= b.timestamp <= a.timestamp + upperBound`
+
+![](pic/0024.png)
+
+所以我们可以看到，间隔联结同样是一种内连接（`inner join`）。与窗口联结不同的是，`interval join`做匹配的时间段是基于流中数据的，所以并不确定；而且流B中的数据可以不只在一个区间内被匹配。
+
+**API调用**：
+
+基于`KeyedStream`的联结（`join`）操作。
+
+`DataStream`在`keyBy`得到`KeyedStream`之后，可以调用`.intervalJoin()`来合并两条流，传入的参数同样是一个`KeyedStream`，两者的key类型应该一致；得到的是一个`IntervalJoin`类型。
+
+先通过`.between()`方法指定间隔的上下界，再调用`.process()`方法，定义对匹配数据对的处理操作。调用`.process()`需要传入一个处理函数，这是处理函数家族的最后一员：“处理联结函数”`ProcessJoinFunction`。
+
+```java
+stream1
+    .keyBy(<KeySelector>)
+    .intervalJoin(stream2.keyBy(<KeySelector>))
+    .between(Time.milliseconds(-2), Time.milliseconds(1))
+    .process (new ProcessJoinFunction<Integer, Integer, String(){
+
+        @Override
+        public void processElement(Integer left, Integer right, Context ctx, Collector<String> out) {
+            out.collect(left + "," + right);
+        }
+    });
+```
+
+抽象类`ProcessJoinFunction`就像是`ProcessFunction`和`JoinFunction`的结合，内部同样有一个抽象方法`.processElement()`。与其他处理函数不同的是，它多了一个参数，这自然是因为有来自两条流的数据。参数中`left`指的就是第一条流中的数据，`right`则是第二条流中与它匹配的数据。每当检测到一组匹配，就会调用这里的`.processElement()`方法，经处理转换之后输出结果。
+
+**Demo**
+
+```java
+public class IntervalJoinDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+        SingleOutputStreamOperator<Tuple2<String, Integer>> ds1 = env
+                .fromElements(
+                        Tuple2.of("a", 1),
+                        Tuple2.of("a", 2),
+                        Tuple2.of("b", 3),
+                        Tuple2.of("c", 4)
+                )
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<Tuple2<String, Integer>>forMonotonousTimestamps()
+                                .withTimestampAssigner((value, ts) -> value.f1 * 1000L)
+                );
+
+
+        SingleOutputStreamOperator<Tuple3<String, Integer, Integer>> ds2 = env
+                .fromElements(
+                        Tuple3.of("a", 1, 1),
+                        Tuple3.of("a", 11, 1),
+                        Tuple3.of("b", 2, 1),
+                        Tuple3.of("b", 12, 1),
+                        Tuple3.of("c", 14, 1),
+                        Tuple3.of("d", 15, 1)
+                )
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<Tuple3<String, Integer, Integer>>forMonotonousTimestamps()
+                                .withTimestampAssigner((value, ts) -> value.f1 * 1000L)
+                );
+
+        // TODO interval join
+        //1. 分别做keyby，key其实就是关联条件
+        KeyedStream<Tuple2<String, Integer>, String> ks1 = ds1.keyBy(r1 -> r1.f0);
+        KeyedStream<Tuple3<String, Integer, Integer>, String> ks2 = ds2.keyBy(r2 -> r2.f0);
+
+        //2. 调用 interval join
+        ks1.intervalJoin(ks2)
+                .between(Time.seconds(-2), Time.seconds(2))
+                .process(
+                        new ProcessJoinFunction<Tuple2<String, Integer>, Tuple3<String, Integer, Integer>, String>() {
+                            /**
+                             * 两条流的数据匹配上，才会调用这个方法
+                             * @param left  ks1的数据
+                             * @param right ks2的数据
+                             * @param ctx   上下文
+                             * @param out   采集器
+                             * @throws Exception
+                             */
+                            @Override
+                            public void processElement(Tuple2<String, Integer> left, Tuple3<String, Integer, Integer> right, Context ctx, Collector<String> out) throws Exception {
+                                // 进入这个方法，是关联上的数据
+                                out.collect(left + "<------>" + right);
+                            }
+                        })
+                .print();
+
+
+
+        env.execute();
+    }
+}
+```
+
+## 6.处理函数
+
+流处理API，无论是基本的转换、聚合，还是更为复杂的窗口操作，其实都是基于DataStream进行转换的，所以可以统称为DataStream API。
+
+在Flink更底层，我们可以不定义任何具体的算子（比如`map`，`filter`，或者`window`），而只是提炼出一个**统一的“处理”（`process`）操作**——它是所有转换算子的一个概括性的表达，可以自定义处理逻辑，所以这一层接口就被叫作“处理函数”（`process function`）。
+
+![](pic/0001.png)
+
+### 6.1.基本处理函数 ProcessFunction
+
+#### 6.1.1. 处理函数功能和使用
+
+处理函数提供了一个“定时服务”（TimerService），我们可以通过它访问流中的事件（event）、时间戳（timestamp）、水位线（watermark），甚至可以注册“定时事件”。而且处理函数继承了`AbstractRichFunction`抽象类，所以拥有**富函数类**的所有特性，同样可以访问状态（state）和其他运行时信息。处理函数还可以直接将数据输出到侧输出流（side output）中。
+
+处理函数的使用与基本的转换操作类似，只需要直接基于`DataStream`调用`.process()`方法就可以了。方法需要传入一个`ProcessFunction`作为参数，用来定义处理逻辑。
+
+
+
+#### 6.1.2.ProcessFunction解析
+
+```java
+public abstract class ProcessFunction<I, O> extends AbstractRichFunction {
+
+    ...
+    public abstract void processElement(I value, Context ctx, Collector<O> out) throws Exception;
+
+    public void onTimer(long timestamp, OnTimerContext ctx, Collector<O> out) throws Exception {}
+    ...
+
+}
+```
+
+抽象类`ProcessFunction`继承了`AbstractRichFunction`，有两个泛型类型参数：`I`表示`Input`，也就是输入的数据类型；`O`表示`Output`，也就是处理完成之后输出的数据类型。
+
+内部单独定义了两个方法：一个是必须要实现的抽象方法`.processElement()`；另一个是非抽象方法`.onTimer()`。
+
+**抽象方法`.processElement()`**
+
+- 用于“处理元素”，定义了处理的核心逻辑。这个方法对于流中的每个元素都会调用一次.
+
+- 参数包括三个：输入数据值`value`，上下文`ctx`，以及“收集器”（Collector）`out`。方法没有返回值，处理之后的输出数据是通过收集器out来定义的。
+  - `value`：当前**流中的输入元素**，也就是正在处理的数据，类型与流中数据类型一致。
+  - `ctx`：类型是`ProcessFunction`中定义的内部抽象类Context，**表示当前运行的上下文**，可以获取到当前的时间戳，并提供了用于查询时间和注册定时器的“定时服务”（TimerService），以及可以将数据发送到“侧输出流”（side output）的方法`.output()`。
+  - `out`：“收集器”（类型为Collector）**，用于返回输出数据**。使用方式与`flatMap`算子中的收集器完全一样，直接调用`out.collect()`方法就可以向下游发出一个数据。这个方法可以多次调用，也可以不调用。
+
+`ProcessFunction`可以轻松实现`flatMap、map、filter`这样的基本转换功能；而通过富函数提供的获取上下文方法`.getRuntimeContext()`，也可以自定义状态（state）进行处理，这也就能实现聚合操作的功能了。
+
+**非抽象方法`.onTimer()`**
+
+方法只有在注册好的定时器触发的时候才会调用，而定时器是通过“定时服务”TimerService来注册的。
+
+本质上是一个基于时间的“回调”（callback）方法，通过时间的进展来触发；在事件时间语义下就是由水位线（watermark）来触发了。
+
+定时方法.onTimer()也有三个参数：时间戳（timestamp），上下文（ctx），以及收集器（out）
+
+- timestamp是指设定好的触发时间，事件时间语义下当然就是水位线了
+
+既然有`.onTimer()`方法做定时触发，我们用`ProcessFunction`也可以自定义数据按照时间分组、定时触发计算输出结果；这其实就实现了窗口（window）的功能。
+
+**注意：在Flink中，只有“按键分区流”`KeyedStream`才支持设置定时器的操作。**
+
+#### 6.1.3.处理函数分类
+
+对于不同类型的流，其实都可以直接调用`.process()`方法进行自定义处理，这时传入的参数就都叫作处理函数。
+
+Flink提供了8个不同的处理函数：
+
+- `ProcessFunction` 最基本的处理函数，基于`DataStream`直接调用`.process()`时作为参数传入。
+- `KeyedProcessFunction`对流按键分区后的处理函数，基于`KeyedStream`调用`.process()`时作为参数传入。要想使用定时器，比如基于`KeyedStream`。
+- `ProcessWindowFunction`
+- `ProcessAllWindowFunction`
+- `CoProcessFunction`：合并（connect）两条流之后的处理函数，基于ConnectedStreams调用.process()时作为参数传入。
+- `ProcessJoinFunction`：间隔连接（interval join）两条流之后的处理函数，基于IntervalJoined调用.process()时作为参数传入。
+- `BroadcastProcessFunction`：广播连接流处理函数，基于`BroadcastConnectedStream`调用.process()时作为参数传入。这里的“广播连接流”`BroadcastConnectedStream`，是一个未keyBy的普通DataStream与一个广播流（BroadcastStream）做连接（conncet）之后的产物。
+- `KeyedBroadcastProcessFunction`：按键分区的广播连接流处理函数，同样是基于BroadcastConnectedStream调用.process()时作为参数传入。
+
+### 6.2.按键分区处理函数 KeyedProcessFunction
+
+#### 6.2.1.定时器（Timer）和定时服务（TimerService）
+
+在`.onTimer()`方法中可以实现定时处理的逻辑，而它能触发的前提，就是之前曾经注册过定时器、并且现在已经到了触发时间。注册定时器的功能，是通过上下文中提供的“定时服务”来实现的。
+
+定时服务与当前运行的环境有关。`ProcessFunction`的上下文（Context）中提供了`.timerService()`方法，可以直接返回一个`TimerService`对象。`TimerService`是基础服务接口，包含六个方法：
+
+```java
+// 获取当前的处理时间
+long currentProcessingTime();
+
+// 获取当前的水位线（事件时间）
+long currentWatermark();
+
+// 注册处理时间定时器，当处理时间超过time时触发
+void registerProcessingTimeTimer(long time);
+
+// 注册事件时间定时器，当水位线超过time时触发
+void registerEventTimeTimer(long time);
+
+// 删除触发时间为time的处理时间定时器
+void deleteProcessingTimeTimer(long time);
+
+// 删除触发时间为time的处理时间定时器
+void deleteEventTimeTimer(long time);
+```
+
+六个方法可以分成两大类：基于处理时间和基于事件时间。而对应的操作主要有三个：获取当前时间，注册定时器，以及删除定时器。
+
+**尽管处理函数中都可以直接访问TimerService，不过只有基于KeyedStream的处理函数，才能去调用注册和删除定时器的方法；未作按键分区的DataStream不支持定时器操作，只能获取当前时间。**
+
+`TimerService`会以键（key）和时间戳为标准，对定时器进行去重；也就是说对于每个key和时间戳，最多只有一个定时器，如果注册了多次，`onTimer()`方法也将只被调用一次。
+
+#### 6.2.2.KeyedProcessFunction案例
+
+```java
+public class KeyedProcessTimerDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+
+        SingleOutputStreamOperator<WaterSensor> sensorDS = env
+                .socketTextStream("hadoop102", 7777)
+                .map(new WaterSensorMapFunction())
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<WaterSensor>forBoundedOutOfOrderness(Duration.ofSeconds(3))
+                                .withTimestampAssigner((element, ts) -> element.getTs() * 1000L)
+                );
+
+
+        KeyedStream<WaterSensor, String> sensorKS = sensorDS.keyBy(sensor -> sensor.getId());
+
+        // TODO Process:keyed
+        SingleOutputStreamOperator<String> process = sensorKS.process(
+                new KeyedProcessFunction<String, WaterSensor, String>() {
+                    /**
+                     * 来一条数据调用一次
+                     * @param value
+                     * @param ctx
+                     * @param out
+                     * @throws Exception
+                     */
+                    @Override
+                    public void processElement(WaterSensor value, Context ctx, Collector<String> out) throws Exception {
+                        //获取当前数据的key
+                        String currentKey = ctx.getCurrentKey();
+
+                        // TODO 1.定时器注册
+                        TimerService timerService = ctx.timerService();
+
+                        // 1、事件时间的案例
+                        Long currentEventTime = ctx.timestamp(); // 数据中提取出来的事件时间
+                        timerService.registerEventTimeTimer(5000L);
+                        System.out.println("当前key=" + currentKey + ",当前时间=" + currentEventTime + ",注册了一个5s的定时器");
+
+                        // 2、处理时间的案例
+//                        long currentTs = timerService.currentProcessingTime();
+//                        timerService.registerProcessingTimeTimer(currentTs + 5000L);
+//                        System.out.println("当前key=" + currentKey + ",当前时间=" + currentTs + ",注册了一个5s后的定时器");
+
+
+                        // 3、获取 process的 当前watermark
+//                        long currentWatermark = timerService.currentWatermark();
+//                        System.out.println("当前数据=" + value + ",当前watermark=" + currentWatermark);
+
+
+
+                        // 注册定时器： 处理时间、事件时间
+//                        timerService.registerProcessingTimeTimer();
+//                        timerService.registerEventTimeTimer();
+                        // 删除定时器： 处理时间、事件时间
+//                        timerService.deleteEventTimeTimer();
+//                        timerService.deleteProcessingTimeTimer();
+
+                        // 获取当前时间进展： 处理时间-当前系统时间，  事件时间-当前watermark
+//                        long currentTs = timerService.currentProcessingTime();
+//                        long wm = timerService.currentWatermark();
+                    }
+
+
+                    /**
+                     * TODO 2.时间进展到定时器注册的时间，调用该方法
+                     * @param timestamp 当前时间进展，就是定时器被触发时的时间
+                     * @param ctx       上下文
+                     * @param out       采集器
+                     * @throws Exception
+                     */
+                    @Override
+                    public void onTimer(long timestamp, OnTimerContext ctx, Collector<String> out) throws Exception {
+                        super.onTimer(timestamp, ctx, out);
+                        String currentKey = ctx.getCurrentKey();
+
+                        System.out.println("key=" + currentKey + "现在时间是" + timestamp + "定时器触发");
+                    }
+                }
+        );
+
+        process.print();
+
+        env.execute();
+    }
+
+}
+```
+
+
+
+### 6.3.窗口处理函数 ProcessWindowFunction
+
+#### 6.3.1.窗口处理函数的使用
+
+窗口处理函数`ProcessWindowFunction`的使用与其他窗口函数类似，也是基于`WindowedStream`直接调用方法就可以，只不过这时调用的是`.process()`。
+
+```java
+stream.keyBy( t -> t.f0 )
+        .window( TumblingEventTimeWindows.of(Time.seconds(10)) )
+        .process(new MyProcessWindowFunction())
+```
+
+#### 6.3.2.ProcessWindowFunction解析
+
+`ProcessWindowFunction`既是处理函数又是全窗口函数。
+
+```java
+public abstract class ProcessWindowFunction<IN, OUT, KEY, W extends Window> extends AbstractRichFunction {
+    ...
+
+    public abstract void process(
+            KEY key, Context context, Iterable<IN> elements, Collector<OUT> out) throws Exception;
+
+    public void clear(Context context) throws Exception {}
+
+    public abstract class Context implements java.io.Serializable {...}
+}
+```
+
+`ProcessWindowFunction`依然是一个继承了`AbstractRichFunction`的抽象类，它有四个类型参数：
+
+- IN：input，数据流中窗口任务的输入数据类型。
+- OUT：output，窗口任务进行计算之后的输出数据类型。
+- KEY：数据中键key的类型。
+- W：窗口的类型，是Window的子类型。一般情况下我们定义时间窗口，W就是TimeWindow。
+
+`ProcessWindowFunction`里面处理数据的核心方法`.process()`。方法包含四个参数。
+
+- key：窗口做统计计算基于的键，也就是之前keyBy用来分区的字段。
+- context：当前窗口进行计算的上下文，它的类型就是`ProcessWindowFunction`内部定义的抽象类Context。
+- elements：窗口收集到用来计算的所有数据，这是一个可迭代的集合类型。
+- out：用来发送数据输出计算结果的收集器，类型为Collector。
+
+内部类`Context `的代码：
+
+```java
+    public abstract class Context implements java.io.Serializable {
+        /** Returns the window that is being evaluated. */
+        public abstract W window();
+
+        /** Returns the current processing time. */
+        public abstract long currentProcessingTime();
+
+        /** Returns the current event-time watermark. */
+        public abstract long currentWatermark();
+
+        /**
+         * State accessor for per-key and per-window state.
+         *
+         * <p><b>NOTE:</b>If you use per-window state you have to ensure that you clean it up by
+         * implementing {@link ProcessWindowFunction#clear(Context)}.
+         */
+        public abstract KeyedStateStore windowState();
+
+        /** State accessor for per-key global state. */
+        public abstract KeyedStateStore globalState();
+
+        /**
+         * Emits a record to the side output identified by the {@link OutputTag}.
+         *
+         * @param outputTag the {@code OutputTag} that identifies the side output to emit to.
+         * @param value The record to emit.
+         */
+        public abstract <X> void output(OutputTag<X> outputTag, X value);
+    }
+```
+
+除了可以通过`.output()`方法定义侧输出流不变外，其他部分都有所变化。这里不再持有TimerService对象，只能通过`currentProcessingTime()`和`currentWatermark()`来获取当前时间，所以失去了设置定时器的功能；另外由于当前不是只处理一个数据，所以也不再提供`.timestamp()`方法。
+
+与此同时，也增加了一些获取其他信息的方法：比如可以通过`.window()`直接获取到当前的窗口对象，也可以通过`.windowState()`和`.globalState()`获取到当前自定义的窗口状态和全局状态。注意这里的“窗口状态”是自定义的，不包括窗口本身已经有的状态，针对当前key、当前窗口有效；而“全局状态”同样是自定义的状态，针对当前key的所有窗口有效。
+
+
+
+`ProcessWindowFunction`中除了`.process()`方法外，并没有`.onTimer()`方法，而是多出了一个.clear()方法。从名字就可以看出，这主要是方便我们进行窗口的清理工作。如果我们自定义了窗口状态，那么必须在`.clear()`方法中进行显式地清除，避免内存溢出。
+
+
+
+至于另一种窗口处理函数`ProcessAllWindowFunction`，它的用法非常类似。区别在于它基于的是`AllWindowedStream`，相当于对没有`keyBy`的数据流直接开窗并调用`.process()`方法：
+
+```java
+stream.windowAll( TumblingEventTimeWindows.of(Time.seconds(10)) )
+    .process(new MyProcessAllWindowFunction())
+```
+
+
+
+### 6.4.案例TopN
+
+**案例需求：**实时统计一段时间内的出现次数最多的水位。
+
+
+
+#### 6.4.1.使用 ProcessAllWindowFunction
+
+**思路一：**一种最简单的想法是，我们干脆不区分不同水位，而是将所有访问数据都收集起来，统一进行统计计算。所以可以不做`keyBy`，直接基于`DataStream`开窗，然后使用全窗口函数`ProcessAllWindowFunction`来进行处理。
+
+```java
+public class ProcessAllWindowTopNDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+
+        SingleOutputStreamOperator<WaterSensor> sensorDS = env
+                .socketTextStream("hadoop102", 7777)
+                .map(new WaterSensorMapFunction())
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<WaterSensor>forBoundedOutOfOrderness(Duration.ofSeconds(3))
+                                .withTimestampAssigner((element, ts) -> element.getTs() * 1000L)
+                );
+
+
+        // 最近10秒= 窗口长度， 每5秒输出 = 滑动步长
+        // TODO 思路一： 所有数据到一起， 用hashmap存， key=vc，value=count值
+        sensorDS.windowAll(SlidingEventTimeWindows.of(Time.seconds(10), Time.seconds(5)))
+                .process(new MyTopNPAWF())
+                .print();
+
+
+        env.execute();
+    }
+
+
+    public static class MyTopNPAWF extends ProcessAllWindowFunction<WaterSensor, String, TimeWindow> {
+
+        @Override
+        public void process(Context context, Iterable<WaterSensor> elements, Collector<String> out) throws Exception {
+            // 定义一个hashmap用来存，key=vc，value=count值
+            Map<Integer, Integer> vcCountMap = new HashMap<>();
+            // 1.遍历数据, 统计 各个vc出现的次数
+            for (WaterSensor element : elements) {
+                Integer vc = element.getVc();
+                if (vcCountMap.containsKey(vc)) {
+                    // 1.1 key存在，不是这个key的第一条数据，直接累加
+                    vcCountMap.put(vc, vcCountMap.get(vc) + 1);
+                } else {
+                    // 1.2 key不存在，初始化
+                    vcCountMap.put(vc, 1);
+                }
+            }
+
+            // 2.对 count值进行排序: 利用List来实现排序
+            List<Tuple2<Integer, Integer>> datas = new ArrayList<>();
+            for (Integer vc : vcCountMap.keySet()) {
+                datas.add(Tuple2.of(vc, vcCountMap.get(vc)));
+            }
+            // 对List进行排序，根据count值 降序
+            datas.sort(new Comparator<Tuple2<Integer, Integer>>() {
+                @Override
+                public int compare(Tuple2<Integer, Integer> o1, Tuple2<Integer, Integer> o2) {
+                    // 降序， 后 减 前
+                    return o2.f1 - o1.f1;
+                }
+            });
+
+            // 3.取出 count最大的2个 vc
+            StringBuilder outStr = new StringBuilder();
+
+            outStr.append("================================\n");
+            // 遍历 排序后的 List，取出前2个， 考虑可能List不够2个的情况  ==》 List中元素的个数 和 2 取最小值
+            for (int i = 0; i < Math.min(2, datas.size()); i++) {
+                Tuple2<Integer, Integer> vcCount = datas.get(i);
+                outStr.append("Top" + (i + 1) + "\n");
+                outStr.append("vc=" + vcCount.f0 + "\n");
+                outStr.append("count=" + vcCount.f1 + "\n");
+                outStr.append("窗口结束时间=" + DateFormatUtils.format(context.window().getEnd(), "yyyy-MM-dd HH:mm:ss.SSS") + "\n");
+                outStr.append("================================\n");
+            }
+
+            out.collect(outStr.toString());
+
+        }
+    }
+
+}
+```
+
+#### 6.4.2.使用KeyedProcessFunction
+
+在 6.4.1. 的基础上做两个优化：
+
+- 一是对数据进行按键分区，分别统计vc的出现次数；
+- 二是进行增量聚合，得到结果最后再做排序输出。
+
+```java
+public class KeyedProcessFunctionTopNDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+
+        SingleOutputStreamOperator<WaterSensor> sensorDS = env
+                .socketTextStream("hadoop102", 7777)
+                .map(new WaterSensorMapFunction())
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<WaterSensor>forBoundedOutOfOrderness(Duration.ofSeconds(3))
+                                .withTimestampAssigner((element, ts) -> element.getTs() * 1000L)
+                );
+
+
+        // 最近10秒= 窗口长度， 每5秒输出 = 滑动步长
+        /**
+         * TODO 思路二： 使用 KeyedProcessFunction实现
+         * 1、按照vc做keyby，开窗，分别count
+         *    ==》 增量聚合，计算 count
+         *    ==》 全窗口，对计算结果 count值封装 ，  带上 窗口结束时间的 标签
+         *          ==》 为了让同一个窗口时间范围的计算结果到一起去
+         *
+         * 2、对同一个窗口范围的count值进行处理： 排序、取前N个
+         *    =》 按照 windowEnd做keyby
+         *    =》 使用process， 来一条调用一次，需要先存，分开存，用HashMap,key=windowEnd,value=List
+         *      =》 使用定时器，对 存起来的结果 进行 排序、取前N个
+         */
+
+        // 1. 按照 vc 分组、开窗、聚合（增量计算+全量打标签）
+        //  开窗聚合后，就是普通的流，没有了窗口信息，需要自己打上窗口的标记 windowEnd
+        SingleOutputStreamOperator<Tuple3<Integer, Integer, Long>> windowAgg = sensorDS.keyBy(sensor -> sensor.getVc())
+                .window(SlidingEventTimeWindows.of(Time.seconds(10), Time.seconds(5)))
+                .aggregate(
+                        new VcCountAgg(),
+                        new WindowResult()
+                );
+
+
+        // 2. 按照窗口标签（窗口结束时间）keyby，保证同一个窗口时间范围的结果，到一起去。排序、取TopN
+        windowAgg.keyBy(r -> r.f2)
+                .process(new TopN(2))
+                .print();
+
+
+        env.execute();
+    }
+
+
+    public static class VcCountAgg implements AggregateFunction<WaterSensor, Integer, Integer> {
+
+        @Override
+        public Integer createAccumulator() {
+            return 0;
+        }
+
+        @Override
+        public Integer add(WaterSensor value, Integer accumulator) {
+            return accumulator + 1;
+        }
+
+        @Override
+        public Integer getResult(Integer accumulator) {
+            return accumulator;
+        }
+
+        @Override
+        public Integer merge(Integer a, Integer b) {
+            return null;
+        }
+    }
+
+
+    /**
+     * 泛型如下：
+     * 第一个：输入类型 = 增量函数的输出  count值，Integer
+     * 第二个：输出类型 = Tuple3(vc，count，windowEnd) ,带上 窗口结束时间 的标签
+     * 第三个：key类型 ， vc，Integer
+     * 第四个：窗口类型
+     */
+    public static class WindowResult extends ProcessWindowFunction<Integer, Tuple3<Integer, Integer, Long>, Integer, TimeWindow> {
+
+        @Override
+        public void process(Integer key, Context context, Iterable<Integer> elements, Collector<Tuple3<Integer, Integer, Long>> out) throws Exception {
+            // 迭代器里面只有一条数据，next一次即可
+            Integer count = elements.iterator().next();
+            long windowEnd = context.window().getEnd();
+            out.collect(Tuple3.of(key, count, windowEnd));
+        }
+    }
+
+
+    public static class TopN extends KeyedProcessFunction<Long, Tuple3<Integer, Integer, Long>, String> {
+        // 存不同窗口的 统计结果，key=windowEnd，value=list数据
+        private Map<Long, List<Tuple3<Integer, Integer, Long>>> dataListMap;
+        // 要取的Top数量
+        private int threshold;
+
+        public TopN(int threshold) {
+            this.threshold = threshold;
+            dataListMap = new HashMap<>();
+        }
+
+        @Override
+        public void processElement(Tuple3<Integer, Integer, Long> value, Context ctx, Collector<String> out) throws Exception {
+            // 进入这个方法，只是一条数据，要排序，得到齐才行 ===》 存起来，不同窗口分开存
+            // 1. 存到HashMap中
+            Long windowEnd = value.f2;
+            if (dataListMap.containsKey(windowEnd)) {
+                // 1.1 包含vc，不是该vc的第一条，直接添加到List中
+                List<Tuple3<Integer, Integer, Long>> dataList = dataListMap.get(windowEnd);
+                dataList.add(value);
+            } else {
+                // 1.1 不包含vc，是该vc的第一条，需要初始化list
+                List<Tuple3<Integer, Integer, Long>> dataList = new ArrayList<>();
+                dataList.add(value);
+                dataListMap.put(windowEnd, dataList);
+            }
+
+            // 2. 注册一个定时器， windowEnd+1ms即可（
+            // 同一个窗口范围，应该同时输出，只不过是一条一条调用processElement方法，只需要延迟1ms即可
+            ctx.timerService().registerEventTimeTimer(windowEnd + 1);
+
+        }
+
+
+        @Override
+        public void onTimer(long timestamp, OnTimerContext ctx, Collector<String> out) throws Exception {
+            super.onTimer(timestamp, ctx, out);
+            // 定时器触发，同一个窗口范围的计算结果攒齐了，开始 排序、取TopN
+            Long windowEnd = ctx.getCurrentKey();
+            // 1. 排序
+            List<Tuple3<Integer, Integer, Long>> dataList = dataListMap.get(windowEnd);
+            dataList.sort(new Comparator<Tuple3<Integer, Integer, Long>>() {
+                @Override
+                public int compare(Tuple3<Integer, Integer, Long> o1, Tuple3<Integer, Integer, Long> o2) {
+                    // 降序， 后 减 前
+                    return o2.f1 - o1.f1;
+                }
+            });
+
+
+            // 2. 取TopN
+            StringBuilder outStr = new StringBuilder();
+
+            outStr.append("================================\n");
+            // 遍历 排序后的 List，取出前 threshold 个， 考虑可能List不够2个的情况  ==》 List中元素的个数 和 2 取最小值
+            for (int i = 0; i < Math.min(threshold, dataList.size()); i++) {
+                Tuple3<Integer, Integer, Long> vcCount = dataList.get(i);
+                outStr.append("Top" + (i + 1) + "\n");
+                outStr.append("vc=" + vcCount.f0 + "\n");
+                outStr.append("count=" + vcCount.f1 + "\n");
+                outStr.append("窗口结束时间=" + vcCount.f2 + "\n");
+                outStr.append("================================\n");
+            }
+
+            // 用完的List，及时清理，节省资源
+            dataList.clear();
+
+            out.collect(outStr.toString());
+        }
+    }
+}
+```
+
+
+
+### 6.5.侧输出流
+
+处理函数还有另外一个特有功能，就是将自定义的数据放入“侧输出流”（side output）输出。
+
+我们之前讲到的绝大多数转换算子，输出的都是单一流，流里的数据类型只能有一种。而侧输出流可以认为是“主流”上分叉出的“支流”，所以可以由一条流产生出多条流，而且这些流中的数据类型还可以不一样。利用这个功能可以很容易地实现**“分流”**操作。
+
+具体应用时，只要在处理函数的`.processElement()`或者`.onTimer()`方法中，调用上下文的`.output()`方法就可以了。如果想要获取这个侧输出流，可以基于处理之后的DataStream直接调用`.getSideOutput()`方法，传入对应的OutputTag。
+
+```java
+DataStream<Integer> stream = env.fromSource(...);
+
+// 在外部先将OutputTag声明出来：
+OutputTag<String> outputTag = new OutputTag<String>("side-output") {};
+
+SingleOutputStreamOperator<Long> longStream = stream.process(new ProcessFunction<Integer, Long>() {
+
+    @Override
+    public void processElement( Integer value, Context ctx, Collector<Integer> out) throws Exception {
+
+      // 转换成Long，输出到主流中
+      out.collect(Long.valueOf(value));
+      
+      // 转换成String，输出到侧输出流中
+      ctx.output(outputTag, "side-output: " + String.valueOf(value));
+    }
+});
+
+// 获取这个侧输出流
+DataStream<String> stringStream = longStream.getSideOutput(outputTag);
+```
+
+## 7.状态管理
+
+### 7.1.Flink中的状态
+
+#### 7.1.1.状态概述
+
+Flink中的任务可以分为**无状态**和**有状态**两种。
+
+无状态算子任务只需要观察每个独立事件，根据当前的输入数据直接转换输出结果，例如`map,fliter,flatMap`属于无状态算子。
+
+有状态算子任务除了当前数据之外，还需要一些其他数据来得到计算结果。此**“其他数据”即状态（state）**，聚合算子、窗口算子属于有状态算子。
+
+有状态算子任务的一般处理流程如下图：
+
+![](pic/0025.png)
+
+#### 7.1.2.状态分类
+
+**托管状态（Managed State）和原始状态（Raw State）**
+
+- 托管状态（更常用）：由Flink 统一管理，状态的存储访问、故障恢复和重组等一系列问题都由Flink实现，开发只需要调接口。
+- 原始状态：自定义的，相当于就是开辟了一块内存，需要自己管理，实现状态的序列化和故障恢复。
+
+**算子状态（Operator State）和按键分区状态（Keyed State）**
+
+一个算子任务一般有多个并行子任务执行，子任务会占据不同的任务槽（slot），slot之间是隔离的。
+
+Flink能管理的状态在并行任务间是无法共享的，每个状态只能针对当前子任务的实例有效。
+
+而很多有状态的操作（比如聚合、窗口）都是要先做keyBy进行按键分区的。按键分区之后，任务所进行的所有计算都应该只针对当前key有效，所以状态也应该按照key彼此隔离。基于此，可以将托管状态分为两类：算子状态和按键分区状态。
+
+- 算子状态：作用范围限定为当前的算子任务实例，对当前并行子任务实例有效。算子状态也可以用在所有算子之上。
+
+  ![](pic/0026.png)
+
+- 按键分区状态：状态是根据输入流中定义的key来维护和访问的，只能定义在KeyedStream中。
+
+  ![](pic/0027.png)
+
+另外，也可以通过富函数类（Rich Function）来自定义Keyed State，所以只要提供了富函数类接口的算子，也都可以使用Keyed State。所以即使是map、filter这样无状态的基本转换算子，我们也可以通过富函数类给它们“追加”Keyed State。比如RichMapFunction、RichFilterFunction。在富函数中，我们可以调用.getRuntimeContext()获取当前的运行时上下文（RuntimeContext），进而获取到访问状态的句柄；这种富函数中自定义的状态也是Keyed State。从这个角度讲，Flink中所有的算子都可以是有状态的。
+
+无论是Keyed State还是Operator State，它们都是在本地实例上维护的，也就是说每个并行子任务维护着对应的状态，算子的子任务之间状态不共享。
+
+### 7.2.按键分区状态 （Keyed State）
+
+
+
+### 7.3.算子状态（Operator State）
+
+
+
+### 7.4.状态后端（State Backends）
+
+
 
 ## Flink SQL
 
