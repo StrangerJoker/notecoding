@@ -3847,17 +3847,137 @@ Table aliceVisitTable = tableEnv.sqlQuery("SELECT url, user FROM EventTable WHER
 
 #### 9.2.4.表转流
 
-9.3.时间属性
+Flink支持 insert、update、delete 更改操作，将表转成流输出到外部系统时，需要对这些更改操作进行编码，通过发送编码消息的方式告诉外部系统要执行的操作。
 
-9.4.DDL数据定义
+Flink Table API和SQL支持三种编码方式： 仅追加（Append-only）流、l 撤回（Retract）流和更新插入（Upsert）流
 
-9.5.查询
+**（1）仅追加流**：仅通过插入（Insert）更改来修改的动态表，可以直接转换为“仅追加”流。这个流中发出的数据，其实就是动态表中新增的每一行。
 
-9.6.常用connector读写
 
-9.7.sql-client中使用save point
 
-9.8.Catlog
+**（2）撤回流**：撤回流是包含两类消息的流，添加（add）消息和撤回（retract）消息。
 
-9.9.代码中使用Flink Sql
+具体的编码规则是：INSERT插入操作编码为add消息；DELETE删除操作编码为retract消息；而UPDATE更新操作则编码为被更改行的retract消息，和更新后行（新行）的add消息。
+
+![](pic/0032.png)
+
+
+
+**（3）更新插入（Upsert）流**：更新插入流中只包含两种类型的消息：更新插入（upsert）消息和删除（delete）消息。
+
+所谓的“upsert”其实是“update”和“insert”的合成词，所以对于更新插入流来说，INSERT插入操作和UPDATE更新操作，统一被编码为upsert消息；而DELETE删除操作则被编码为delete消息。
+
+![](pic/0033.png)
+
+需要注意的是，在代码里将动态表转换为`DataStream`时，只支持仅追加（append-only）和撤回（retract）流，我们调用`toChangelogStream()`得到的其实就是撤回流。而连接到外部系统时，则可以支持不同的编码方法，这取决于外部系统本身的特性。
+
+### 9.3.时间属性
+
+基于时间的操作（比如时间窗口），需要定义相关的时间语义和时间数据来源的信息。
+
+所谓的时间属性（time attributes），其实就是每个表模式结构（schema）的一部分。它可以在创建表的DDL里直接定义为一个字段，也可以在DataStream转换成表时定义。一旦定义了时间属性，它就可以作为一个普通字段引用，并且可以在基于时间的操作中使用。
+
+时间属性的数据类型必须为`TIMESTAMP`，它的行为类似于常规时间戳，可以直接访问并且进行计算。
+
+还是分为两种：事件时间和处理时间
+
+#### 9.3.1.事件时间
+
+事件时间属性可以在创建表DDL中定义，增加一个字段，通过`WATERMARK`语句来定义事件时间属性。具体定义方式如下：
+
+```sql
+CREATE TABLE EventTable(
+  user STRING,
+  url STRING,
+  ts TIMESTAMP(3),
+  WATERMARK FOR ts AS ts - INTERVAL '5' SECOND
+) WITH (
+  ...
+);
+```
+
+时间戳类型必须是 `TIMESTAMP` 或者`TIMESTAMP_LTZ` 类型。但是时间戳一般都是秒或者是毫秒（`BIGINT` 类型），这种情况可以通过如下方式转换
+
+```sql
+ts BIGINT,
+time_ltz AS TO_TIMESTAMP_LTZ(ts, 3),
+```
+
+
+
+#### 9.3.2.处理时间
+
+在定义处理时间属性时，必须要额外声明一个字段，专门用来保存当前的处理时间。
+
+在创建表的DDL（`CREATE TABLE`语句）中，可以增加一个额外的字段，通过调用系统内置的`PROCTIME()`函数来指定当前的处理时间属性。
+
+```sql
+CREATE TABLE EventTable(
+  user STRING,
+  url STRING,
+  ts AS PROCTIME()
+) WITH (
+  ...
+);
+```
+
+### 9.4.DDL(Data Definition Language)数据定义
+
+#### 9.4.1.数据库
+
+（1）创建
+
+```sql
+CREATE DATABASE [IF NOT EXISTS] [catalog_name.]db_name
+  [COMMENT database_comment]
+  WITH (key1=val1, key2=val2, ...)
+```
+
+（2）查询
+
+```sql
+SHOW DATABASES 
+SHOW CURRENT DATABASE # 查询当前数据库
+```
+
+（3）修改
+
+```sql
+ALTER DATABASE [catalog_name.]db_name SET (key1=val1, key2=val2, ...)
+```
+
+（4）删除
+
+```sql
+DROP DATABASE [IF EXISTS] [catalog_name.]db_name [ (RESTRICT | CASCADE) ]
+```
+
+- RESTRICT：删除非空数据库会触发异常。默认启用
+- CASCADE：删除非空数据库也会删除所有相关的表和函数。
+
+（5）切换
+
+```sql
+USE database_name;
+```
+
+#### 9.4.2.表
+
+##### 9.4.2.1.创建
+
+##### 9.4.2.2.查看
+
+##### 9.4.2.3.修改
+
+##### 9.4.2.4.删除
+
+### 9.5.查询
+
+### 9.6.常用connector读写
+
+### 9.7.sql-client中使用save point
+
+### 9.8.Catlog
+
+### 9.9.代码中使用Flink Sql
 
