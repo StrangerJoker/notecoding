@@ -3721,7 +3721,121 @@ env.setStateBackend(new EmbeddedRocksDBStateBackend());
 
 #### 9.1.1.基于yarn模式
 
+启动flink
+
+```shell
+/opt/module/flink-1.17.0/bin/yarn-session.sh -d
+```
+
+启动flink的sql-client
+
+```shell
+flink-1.17.0/bin/sql-client.sh embedded -s yarn-session
+```
+
+#### 9.1.2.常用配置
+
+**（1）结果显示模式**
+
+```shell
+#默认table，还可以设置为tableau、changelog
+SET sql-client.execution.result-mode=tableau;
+```
+
+**（2）执行环境**
+
+```shell
+SET execution.runtime-mode=streaming; #默认streaming，也可以设置batch
+```
+
+**（3）默认并行度**
+
+```shell
+SET parallelism.default=1;
+```
+
+**（4）状态TTL**
+
+```shell
+SET table.exec.state.ttl=1000;
+```
+
+**（5）通过sql文件初始化**
+
+创建sql文件
+
+```shell
+vim conf/sql-client-init.sql
+
+SET sql-client.execution.result-mode=tableau;
+CREATE DATABASE mydatabase;
+```
+
+启动时，指定sql文件
+
+```shell
+flink-1.17.0/bin/sql-client.sh embedded -s yarn-session -i conf/sql-client-init.sql
+```
+
 ### 9.2.流处理中的表
+
+|                                             | **关系型表****/SQL**       | **流处理**                                   |
+| ------------------------------------------- | -------------------------- | -------------------------------------------- |
+| **处理的数据对象**                          | 字段元组的有界集合         | 字段元组的无限序列                           |
+| **查询（****Query****）**  **对数据的访问** | 可以访问到完整的数据输入   | 无法访问到所有数据，必须“持续”等待流式输入   |
+| **查询终止条件**                            | 生成固定大小的结果集后终止 | 永不停止，根据持续收到的数据不断更新查询结果 |
+
+#### 9.2.1.动态表和持续查询
+
+**（1）动态表（Dynamic Tables）**
+
+当流中有新数据到来，初始的表中会插入一行；而基于这个表定义的SQL查询，就应该在之前的基础上更新结果。这样得到的表就会不断地动态变化，被称为“动态表”（Dynamic Tables）。
+
+动态表的数据随时间变化。
+
+**（2）持续查询（Continuous Query）**
+
+动态表可以像静态的批处理表一样进行查询操作。由于数据在不断变化，因此基于它定义的SQL查询也不可能执行一次就得到最终结果。这样一来，我们**对动态表的查询也就永远不会停止，一直在随着新数据的到来而继续执行。**这样的查询就被称作“持续查询”（Continuous Query）。
+
+对动态表定义的查询操作，都是持续查询；而持续查询的结果也会是一个动态表。
+
+由于每次数据到来都会触发查询操作，因此可以认为一次查询面对的数据集，就是当前输入动态表中收到的所有数据。这相当于是对输入动态表做了一个“快照”（snapshot），当作有限数据集进行批处理；流式数据的到来会触发连续不断的快照查询，像动画一样连贯起来，就构成了“持续查询”。
+
+![](pic/0028.png)
+
+持续查询的步骤如下：
+
+（1）流（stream）被转换为动态表（dynamic table）；
+
+（2）对动态表进行持续查询（continuous query），生成新的动态表；
+
+（3）生成的动态表被转换成流。
+
+#### 9.2.2.流转表
+
+如果把流看作一张表，那么**流中每个数据的到来，都应该看作是对表的一次插入（Insert）操作，会在表的末尾添加一行数据。**因为流是连续不断的，而且之前的输出结果无法改变、只能在后面追加；所以我们其实是**通过一个只有插入操作（insert-only）的更新日志（changelog）流，来构建一个表。**
+
+例如，当用户点击事件到来时，就对应着动态表中的一次插入（Insert）操作，每条数据就是表中的一行；随着插入更多的点击事件，得到的动态表将不断增长。
+
+![](pic/0029.png)
+
+#### 9.2.3.用sql持续查询
+
+**（1）更新（Update）查询**
+
+```java
+Table urlCountTable = tableEnv.sqlQuery("SELECT user, COUNT(url) as cnt FROM EventTable GROUP BY user");
+```
+
+当原始动态表不停地插入新的数据时，查询得到的`urlCountTable`会持续地进行更改。由于`count`数量可能会叠加增长，因此这里的更改操作可以是简单的插入（Insert），也可以是对之前数据的更新（Update）。这种持续查询被称为更新查询（Update Query），更新查询得到的结果表如果想要转换成`DataStream`，必须调用`toChangelogStream()`方法。
+
+![](pic/0030.png)
+
+**（2）追加（Append）查询**
+
+
+
+#### 9.2.4.表转流
 
 9.3.时间属性
 
