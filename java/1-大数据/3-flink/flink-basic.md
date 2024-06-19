@@ -3004,23 +3004,736 @@ Flink能管理的状态在并行任务间是无法共享的，每个状态只能
 
   ![](pic/0027.png)
 
-另外，也可以通过富函数类（Rich Function）来自定义Keyed State，所以只要提供了富函数类接口的算子，也都可以使用Keyed State。所以即使是map、filter这样无状态的基本转换算子，我们也可以通过富函数类给它们“追加”Keyed State。比如RichMapFunction、RichFilterFunction。在富函数中，我们可以调用.getRuntimeContext()获取当前的运行时上下文（RuntimeContext），进而获取到访问状态的句柄；这种富函数中自定义的状态也是Keyed State。从这个角度讲，Flink中所有的算子都可以是有状态的。
+另外，也可以通过富函数类（Rich Function）来自定义Keyed State，所以只要提供了富函数类接口的算子，也都可以使用Keyed State。所以即使是map、filter这样无状态的基本转换算子，我们也可以通过富函数类给它们“追加”Keyed State。比如`RichMapFunction`、`RichFilterFunction`。
+
+在富函数中，我们可以调用`.getRuntimeContext()`获取当前的运行时上下文（`RuntimeContext`），进而获取到访问状态的句柄；这种富函数中自定义的状态也是Keyed State。从这个角度讲，Flink中所有的算子都可以是有状态的。
 
 无论是Keyed State还是Operator State，它们都是在本地实例上维护的，也就是说每个并行子任务维护着对应的状态，算子的子任务之间状态不共享。
 
 ### 7.2.按键分区状态 （Keyed State）
 
+任务按照键（key）来访问和维护的状态。它的特点非常鲜明，就是以key为作用范围进行隔离。
+
+#### 7.2.1.值状态 ValueState
+
+顾名思义，状态中只保存一个“值”（value）。`ValueState<T>`本身是一个接口，源码中定义如下：
+
+```java
+public interface ValueState<T> extends State {
+    // 获取当前状态
+    T value() throws IOException;
+    // 对状态进行更新
+    void update(T value) throws IOException;
+}
+```
+
+在具体使用时，为了让运行时上下文清楚到底是哪个状态，我们还需要创建一个“状态描述器”（StateDescriptor）来提供状态的基本信息。
+
+`ValueState`的状态描述器`ValueStateDescriptor`构造方法如下:
+
+```java
+public ValueStateDescriptor(String name, Class<T> typeClass) {
+    super(name, typeClass, null);
+}
+```
+
+demo:
+
+```java
+
+/**
+ * 连续两个 wm 的差值 超过阈值，告警
+ */
+public class KeyedValueStateDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+
+        SingleOutputStreamOperator<WaterSensor> sensorDS = env
+                .socketTextStream("hadoop102", 7777)
+                .map(new WaterSensorMapFunction())
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<WaterSensor>forBoundedOutOfOrderness(Duration.ofSeconds(3))
+                                .withTimestampAssigner((element, ts) -> element.getTs() * 1000L)
+                );
+
+        sensorDS.keyBy(WaterSensor::getId)
+                .process(new KeyedProcessFunction<String, WaterSensor, String>() {
+                    ValueState<Integer> lastVcState;
+
+                    /**
+                     * 状态只能在 open 方法里初始化
+                     * @param parameters The configuration containing the parameters attached to the contract.
+                     * @throws Exception
+                     */
+                    @Override
+                    public void open(Configuration parameters) throws Exception {
+                        super.open(parameters);
+                        lastVcState = getRuntimeContext()
+                                .getState(new ValueStateDescriptor<>("lastVcState", Types.INT));
+                    }
+
+                    @Override
+                    public void processElement(WaterSensor value, KeyedProcessFunction<String,
+                            WaterSensor, String>.Context ctx, Collector<String> out) throws Exception {
+                        Integer lastVc = lastVcState.value() == null ? 0 : lastVcState.value();
+                        Integer curVc = value.getVc();
+                        int diff = Math.abs(curVc - lastVc);
+                        if (diff > 10) {
+                            out.collect("传感器=" + value.getId() + "当前水位值="
+                                    + curVc + ",上一条水位值=" + lastVc + ",相差=" + curVc);
+                        }
+                        lastVcState.update(curVc);
+                    }
+                }).print();
+        env.execute();
+    }
+}
+```
+
+
+
+#### 7.2.2.列表状态 ListState
+
+将需要保存的数据，以列表（List）的形式组织起来。在`ListState<T>`接口中同样有一个类型参数T，表示列表中数据的类型。
+
+```java
+	Iterable<T> get()：获取当前的列表状态，返回的是一个可迭代类型Iterable<T>；
+	update(List<T> values)：传入一个列表values，直接对状态进行覆盖；
+	add(T value)：在状态列表中添加一个元素value；
+	addAll(List<T> values)：向列表中添加多个元素，以列表values形式传入。
+```
+
+demo:
+
+```java
+/**
+ * 输出最大的三个 WM
+ */
+public class KeyedListStateDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+
+        SingleOutputStreamOperator<WaterSensor> sensorDS = env
+                .socketTextStream("hadoop102", 7777)
+                .map(new WaterSensorMapFunction())
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<WaterSensor>forBoundedOutOfOrderness(Duration.ofSeconds(3))
+                                .withTimestampAssigner((element, ts) -> element.getTs() * 1000L)
+                );
+
+        sensorDS.keyBy(WaterSensor::getId)
+                .process(new KeyedProcessFunction<String, WaterSensor, String>() {
+
+                    ListState<Integer> vcListState;
+
+                    @Override
+                    public void open(Configuration parameters) throws Exception {
+                        super.open(parameters);
+                        vcListState = getRuntimeContext().getListState(
+                                new ListStateDescriptor<>("vcListState", Types.INT));
+                    }
+
+                    @Override
+                    public void processElement(WaterSensor value, KeyedProcessFunction<String,
+                            WaterSensor, String>.Context ctx, Collector<String> out) throws Exception {
+                        Iterable<Integer> iter = vcListState.get();
+                        List<Integer> li = new ArrayList<>();
+                        iter.forEach(li::add);
+                        li.add(value.getVc());
+                        li.sort((v1, v2) -> v2 - v1);
+                        if (li.size() > 3) {
+                            li.remove(3);
+                        }
+                        vcListState.update(li);
+                        out.collect("sensorId=" + value.getId() + ",top3 WM=" + li);
+                    }
+                }).print();
+        env.execute();
+    }
+}
+```
+
+#### 7.2.3.Map状态 MapState
+
+把一些键值对（key-value）作为状态整体保存起来，可以认为就是一组key-value映射的列表。对应的`MapState<UK, UV>`接口中，就会有`UK`、`UV`两个泛型，分别表示保存的key和value的类型。
+
+```java
+	UV get(UK key)：传入一个key作为参数，查询对应的value值；
+	put(UK key, UV value)：传入一个键值对，更新key对应的value值；
+	putAll(Map<UK, UV> map)：将传入的映射map中所有的键值对，全部添加到映射状态中；
+	remove(UK key)：将指定key对应的键值对删除；
+	boolean contains(UK key)：判断是否存在指定的key，返回一个boolean值。
+另外，MapState也提供了获取整个映射相关信息的方法；
+	Iterable<Map.Entry<UK, UV>> entries()：获取映射状态中所有的键值对；
+	Iterable<UK> keys()：获取映射状态中所有的键（key），返回一个可迭代Iterable类型；
+	Iterable<UV> values()：获取映射状态中所有的值（value），返回一个可迭代Iterable类型；
+	boolean isEmpty()：判断映射是否为空，返回一个boolean值。
+
+```
+
+demo:
+
+```java
+/**
+ * 输出 每种传感器 每种WM的个数
+ */
+public class KeyedMapStateDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+
+        SingleOutputStreamOperator<WaterSensor> sensorDS = env
+                .socketTextStream("hadoop102", 7777)
+                .map(new WaterSensorMapFunction())
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<WaterSensor>forBoundedOutOfOrderness(Duration.ofSeconds(3))
+                                .withTimestampAssigner((element, ts) -> element.getTs() * 1000L)
+                );
+
+        sensorDS.keyBy(WaterSensor::getId)
+                .process(new KeyedProcessFunction<String, WaterSensor, String>() {
+                    MapState<Integer, Integer> mapState;
+
+                    @Override
+                    public void open(Configuration parameters) throws Exception {
+                        super.open(parameters);
+                        mapState = getRuntimeContext().getMapState(
+                                new MapStateDescriptor<>("mapState", Types.INT, Types.INT));
+                    }
+
+                    @Override
+                    public void processElement(WaterSensor value, KeyedProcessFunction<String,
+                            WaterSensor, String>.Context ctx, Collector<String> out) throws Exception {
+                        Integer vc = value.getVc();
+                        Integer cnt = mapState.get(vc);
+                        if (cnt == null) {
+                            cnt = 1;
+                        } else {
+                            cnt++;
+                        }
+                        mapState.put(vc, cnt);
+                        // print
+                        StringBuilder sb = new StringBuilder();
+                        for (Map.Entry<Integer, Integer> entry : mapState.entries()) {
+                            sb.append(entry.getKey()).append("=>").append(entry.getValue()).append("\n");
+                        }
+                        out.collect("传感器Id:" + value.getId() + "\n" + sb);
+                    }
+                }).print();
+        env.execute();
+    }
+}
+```
+
+
+
+#### 7.2.4.**归约**状态 ReduceState
+
+类似于值状态（Value），不过需要对添加进来的所有数据进行归约，将归约聚合之后的值作为状态保存下来。
+
+`ReducingState<T>`这个接口调用的方法类似于`ListState`，只不过它保存的只是一个聚合值，所以调用`.add()`方法时，不是在状态列表里添加元素，而是直接把新数据和之前的状态进行归约，并用得到的结果更新状态。
+
+归约逻辑的定义，是在归约状态描述器（ReducingStateDescriptor）中，通过传入一个归约函数（ReduceFunction）来实现的。
+
+```java
+public ReducingStateDescriptor(
+    String name, 
+    ReduceFunction<T> reduceFunction, // 
+    Class<T> typeClass) {...}
+```
+
+demo：
+
+```java
+/**
+ * 求水位线之和
+ */
+public class KeyedReduceStateDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+
+        SingleOutputStreamOperator<WaterSensor> sensorDS = env
+                .socketTextStream("hadoop102", 7777)
+                .map(new WaterSensorMapFunction())
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<WaterSensor>forBoundedOutOfOrderness(Duration.ofSeconds(3))
+                                .withTimestampAssigner((element, ts) -> element.getTs() * 1000L)
+                );
+
+        sensorDS.keyBy(WaterSensor::getId)
+                .process(new KeyedProcessFunction<String, WaterSensor, String>() {
+
+                    ReducingState<Integer> vcSumReduceState;
+
+                    @Override
+                    public void open(Configuration parameters) throws Exception {
+                        super.open(parameters);
+                        vcSumReduceState = getRuntimeContext().getReducingState(
+                                new ReducingStateDescriptor<>("", new ReduceFunction<Integer>() {
+                                    @Override
+                                    public Integer reduce(Integer value1, Integer value2) throws Exception {
+                                        return value1 + value2;
+                                    }
+                                }, Types.INT));
+                    }
+
+                    @Override
+                    public void processElement(WaterSensor value, KeyedProcessFunction<String, WaterSensor, String>.Context ctx, Collector<String> out) throws Exception {
+                        vcSumReduceState.add(value.getVc());
+                        out.collect("SensorId:" + value.getId() + ",sum ts:" + vcSumReduceState.get());
+                    }
+                }).print();
+        env.execute();
+    }
+}
+```
+
+
+
+#### 7.2.5.聚合状态 AggregatingState
+
+与归约状态非常类似，聚合状态也是一个值，用来保存添加进来的所有数据的聚合结果。与ReducingState不同的是，它的聚合逻辑是由在描述器中传入一个更加一般化的聚合函数（AggregateFunction）来定义的；
+
+聚合状态描述器（AggregatingStateDescriptor）中传入一个 AggregateFunction
+
+```java
+    public AggregatingStateDescriptor(
+            String name,
+            AggregateFunction<IN, ACC, OUT> aggFunction,
+            TypeInformation<ACC> stateType) {
+    }
+```
+
+
+
+demo
+
+```java
+/**
+ * 求水位线平均值
+ */
+public class KeyedAggregateStateDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+
+        SingleOutputStreamOperator<WaterSensor> sensorDS = env
+                .socketTextStream("hadoop102", 7777)
+                .map(new WaterSensorMapFunction())
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<WaterSensor>forBoundedOutOfOrderness(Duration.ofSeconds(3))
+                                .withTimestampAssigner((element, ts) -> element.getTs() * 1000L)
+                );
+
+        sensorDS.keyBy(WaterSensor::getId)
+                .process(new KeyedProcessFunction<String, WaterSensor, String>() {
+                    AggregatingState<Integer, Double> vcAggrState;
+
+                    @Override
+                    public void open(Configuration parameters) throws Exception {
+                        super.open(parameters);
+                        vcAggrState = getRuntimeContext().getAggregatingState(
+                                new AggregatingStateDescriptor<Integer, Tuple2<Integer, Integer>, Double>(
+                                        "vcAggrState", new AggregateFunction<Integer, Tuple2<Integer, Integer>, Double>() {
+                                    @Override
+                                    public Tuple2<Integer, Integer> createAccumulator() {
+                                        return Tuple2.of(0, 0);
+                                    }
+
+                                    @Override
+                                    public Tuple2<Integer, Integer> add(Integer value, Tuple2<Integer, Integer> accumulator) {
+                                        return Tuple2.of(accumulator.f0 + value, accumulator.f1 + 1);
+                                    }
+
+                                    @Override
+                                    public Double getResult(Tuple2<Integer, Integer> accumulator) {
+                                        return (double) accumulator.f0 / accumulator.f1;
+                                    }
+
+                                    @Override
+                                    public Tuple2<Integer, Integer> merge(Tuple2<Integer, Integer> a, Tuple2<Integer, Integer> b) {
+                                        return Tuple2.of(a.f0 + b.f0, a.f1 + b.f1);
+                                    }
+                                }, Types.TUPLE(Types.INT, Types.INT))
+                        );
+                    }
+
+                    @Override
+                    public void processElement(WaterSensor value, KeyedProcessFunction<String,
+                            WaterSensor, String>.Context ctx, Collector<String> out) throws Exception {
+                        vcAggrState.add(value.getVc());
+                        Double avg = vcAggrState.get();
+                        out.collect("SensorId:" + value.getVc() + ",avg value:" + avg);
+                    }
+                }).print();
+        env.execute();
+    }
+}
+```
+
+
+
+#### 7.2.6.状态生存时间TTL
+
+在实际应用中，很多状态会随着时间的推移逐渐增长，如果不加以限制，最终就会导致存储空间的耗尽。一个优化的思路是直接在代码中调用`.clear()`方法去清除状态，但是有时候我们的逻辑要求不能直接清除。这时就需要配置一个状态的“生存时间”（time-to-live，TTL），当状态在内存中存在的时间超出这个值时，就将它清除。
+
+```java
+StateTtlConfig ttlConfig = StateTtlConfig
+    .newBuilder(Time.seconds(10))
+    .setUpdateType(StateTtlConfig.UpdateType.OnCreateAndWrite)
+    .setStateVisibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
+    .build();
+
+ValueStateDescriptor<String> stateDescriptor = new ValueStateDescriptor<>("my state", String.class);
+
+stateDescriptor.enableTimeToLive(ttlConfig);
+```
+
+上述过程用到了几个配置项：
+
+- `.newBuilder()`：**状态TTL配置的构造器方法**，必须调用，返回一个Builder之后再调用.build()方法就可以得到StateTtlConfig了。方法需要传入一个Time作为参数，这就是设定的状态生存时间。
+- `.setUpdateType()`：**设置更新类型**。更新类型指定了什么时候更新状态失效时间，这里的OnCreateAndWrite表示只有创建状态和更改状态（写操作）时更新失效时间。另一种类型OnReadAndWrite则表示无论读写操作都会更新失效时间，也就是只要对状态进行了访问，就表明它是活跃的，从而延长生存时间。这个配置默认为`OnCreateAndWrite`。
+- `.setStateVisibility()`：**设置状态的可见性**。所谓的“状态可见性”，是指因为清除操作并不是实时的，所以当状态过期之后还有可能继续存在，这时如果对它进行访问，能否正常读取到就是一个问题了。`NeverReturnExpired`是默认行为，表示从不返回过期值，也就是只要过期就认为它已经被清除了，应用不能继续读取；这在处理会话或者隐私数据时比较重要。对应的另一种配置是`ReturnExpireDefNotCleanedUp`，就是如果过期状态还存在，就返回它的值。
+
+demo:
+
+```java
+/**
+ * 连续两个 wm 的差值 超过阈值，告警
+ */
+public class StateTtlDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(1);
+
+
+        SingleOutputStreamOperator<WaterSensor> sensorDS = env
+                .socketTextStream("hadoop102", 7777)
+                .map(new WaterSensorMapFunction())
+                .assignTimestampsAndWatermarks(
+                        WatermarkStrategy
+                                .<WaterSensor>forBoundedOutOfOrderness(Duration.ofSeconds(3))
+                                .withTimestampAssigner((element, ts) -> element.getTs() * 1000L)
+                );
+
+        sensorDS.keyBy(WaterSensor::getId)
+                .process(new KeyedProcessFunction<String, WaterSensor, String>() {
+                    ValueState<Integer> lastVcState;
+
+                    /**
+                     * 状态只能在 open 方法里初始化
+                     * @param parameters The configuration containing the parameters attached to the contract.
+                     * @throws Exception
+                     */
+                    @Override
+                    public void open(Configuration parameters) throws Exception {
+                        super.open(parameters);
+                        ValueStateDescriptor<Integer> stateDescriptor = new ValueStateDescriptor<>("lastVcState", Types.INT);
+                        StateTtlConfig ttlConfig = StateTtlConfig.newBuilder(Time.seconds(5))
+                                .setUpdateType(StateTtlConfig.UpdateType.OnReadAndWrite)
+                                .setStateVisibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
+                                .build();
+                        stateDescriptor.enableTimeToLive(ttlConfig);
+                        lastVcState = getRuntimeContext().getState(stateDescriptor);
+                    }
+
+                    @Override
+                    public void processElement(WaterSensor value, KeyedProcessFunction<String,
+                            WaterSensor, String>.Context ctx, Collector<String> out) throws Exception {
+                        out.collect("sensorId:" + value.getId() + ",state:" + lastVcState.value());
+                        lastVcState.update(value.getVc());
+                    }
+                }).print();
+        env.execute();
+    }
+}
+```
+
 
 
 ### 7.3.算子状态（Operator State）
+
+算子状态（Operator State）就是一个算子并行实例上定义的状态，作用范围被限定为当前算子任务。算子状态跟数据的key无关，所以不同key的数据只要被分发到同一个并行子任务，就会访问到同一个Operator State。
+
+#### 7.3.1.列表状态 ListState
+
+与Keyed State中的`ListState`一样，将状态表示为一组数据的列表。
+
+与Keyed State中的列表状态的区别是：在算子状态的上下文中，不会按键（key）分别处理状态，所以每一个并行子任务上只会保留一个“列表”（list），也就是当前并行子任务上所有状态项的集合。列表中的状态项就是可以重新分配的最细粒度，彼此之间完全独立。
+
+当算子并行度进行缩放调整时，算子的列表状态中的所有元素项会被统一收集起来，相当于把多个分区的列表合并成了一个“大列表”，然后再均匀地分配给所有并行任务。这种“均匀分配”的具体方法就是“轮询”（round-robin），与之前介绍的rebanlance数据传输方式类似，是通过逐一“发牌”的方式将状态项平均分配的。这种方式也叫作“平均分割重组”（even-split redistribution）。
+
+算子状态中不会存在“键组”（key group）这样的结构，所以为了方便重组分配，就把它直接定义成了“列表”（list）。这也就解释了，为什么算子状态中没有最简单的值状态（ValueState）。
+
+demo:在map算子中计算数据的个数。
+
+```java
+public class OperatorListStateDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(3);
+
+        env
+                .socketTextStream("hadoop102", 7777)
+                .map(new MyCountMapFunction())
+                .print();
+
+
+        env.execute();
+    }
+
+    /**
+     * 状态： 收到消息的计数器
+     */
+    public static class MyCountMapFunction implements MapFunction<String, Long>, CheckpointedFunction {
+
+        private Long count = 0L;
+
+        // 算子状态
+        private ListState<Long> state;
+
+        @Override
+        public Long map(String value) throws Exception {
+            return ++count;
+        }
+
+        /**
+         * 本地变量持久化：将本地变量拷贝到算子状态中。 开启check point时才会调用
+         *
+         * @param context the context for drawing a snapshot of the operator
+         * @throws Exception
+         */
+        @Override
+        public void snapshotState(FunctionSnapshotContext context) throws Exception {
+            System.out.println("snapshotState...");
+            // 清空算子状态
+            state.clear();
+            // 将本地状态添加到算子状态中
+            state.add(count);
+        }
+
+        /**
+         * 初始化本地变量：从状态中，把数据添加到本地变量，每个子任务调用一次
+         *
+         * @param context the context for initializing the operator
+         * @throws Exception
+         */
+        @Override
+        public void initializeState(FunctionInitializationContext context) throws Exception {
+            System.out.println("initializeState....");
+            // 从上下文初始化算子状态
+            context.getOperatorStateStore().getListState(new ListStateDescriptor<Long>("state", Types.LONG));
+            // 从算子状态中 把数据添加到 本地变量中
+            if (context.isRestored()) {
+                for (Long c : state.get()) {
+                    count += c;
+                }
+            }
+        }
+    }
+}
+```
+
+
+
+
+
+
+
+#### 7.3.2.联合列表状态 UnionListState
+
+与ListState类似，联合列表状态也会将状态表示为一个列表。它与常规列表状态的区别在于，算子并行度进行缩放调整时对于状态的分配方式不同。
+
+UnionListState的重点就在于“联合”（union）。在并行度调整时，常规列表状态是轮询分配状态项，而联合列表状态的算子则会直接**广播**状态的完整列表。这种分配也叫作“联合重组”（union redistribution）。
+
+使用方式：
+
+```java
+state = context
+              .getOperatorStateStore()
+              .getUnionListState(new ListStateDescriptor<Long>("union-state", Types.LONG));
+```
+
+
+
+#### 7.3.3.广播状态 **BroadcastState**
+
+有时我们希望算子并行子任务都保持同一份**“全局”状态**，用来做统一的配置和规则设定。这时所有分区的所有数据都会访问到同一个状态，状态就像被“广播”到所有分区一样，这种特殊的算子状态，就叫作广播状态（BroadcastState）。
+
+因为广播状态在每个并行子任务上的实例都一样，所以在并行度调整的时候就比较简单，只要复制一份到新的并行任务就可以实现扩展；而对于并行度缩小的情况，可以将多余的并行子任务连同状态直接砍掉——因为状态都是复制出来的，并不会丢失。
+
+demo:水位超过指定的阈值发送告警，阈值可以动态修改。
+
+```java
+public class OperatorBroadcastStateDemo {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(3);
+
+        // 数据流
+        SingleOutputStreamOperator<WaterSensor> dataStream = env.socketTextStream("hadoop102", 7777)
+                .map(new WaterSensorMapFunction());
+
+        // 配置流
+        DataStreamSource<String> configStream = env.socketTextStream("hadoop102", 8888);
+
+        // 将配置流 广播
+        MapStateDescriptor<String, Integer> broadcastMapState = new MapStateDescriptor<>("broadcast-state", Types.STRING, Types.INT);
+        BroadcastStream<String> configBs = configStream.broadcast(broadcastMapState);
+
+        // 将 数据流 和 配置流 connect
+        BroadcastConnectedStream<WaterSensor, String> sensorBCS = dataStream.connect(configBs);
+
+        // 调用 process
+        sensorBCS.process(new BroadcastProcessFunction<WaterSensor, String, String>() {
+            /**
+             * 数据流处理方法：数据流只读广播状态
+             */
+            @Override
+            public void processElement(WaterSensor value, BroadcastProcessFunction<WaterSensor, String,
+                    String>.ReadOnlyContext ctx, Collector<String> out) throws Exception {
+                ReadOnlyBroadcastState<String, Integer> broadcastState = ctx.getBroadcastState(broadcastMapState);
+                Integer threshold = broadcastState.get("threshold");
+                threshold = threshold == null ? 0 : threshold;
+                if (value.getVc() > threshold) {
+                    out.collect(value + "over threshold:" + threshold);
+                }
+            }
+
+            /**
+             * 广播流处理方法：广播流可以更新广播状态
+             */
+            @Override
+            public void processBroadcastElement(String value, BroadcastProcessFunction<WaterSensor, String,
+                    String>.Context ctx, Collector<String> out) throws Exception {
+                // 读取广播状态
+                BroadcastState<String, Integer> broadcastState = ctx.getBroadcastState(broadcastMapState);
+                broadcastState.put("threshold", Integer.valueOf(value));
+            }
+        }).print();
+
+        env.execute();
+    }
+}
+
+```
 
 
 
 ### 7.4.状态后端（State Backends）
 
+在Flink中，状态的存储、访问以及维护，都是由一个可插拔的组件决定的，这个组件就叫作状态后端（state backend）。状态后端主要负责管理本地状态的存储方式和位置。
+
+#### 7.4.1.状态后端分类
+
+状态后端是一个“开箱即用”的组件，可以在不改变应用程序逻辑的情况下独立配置。Flink中提供了两类不同的状态后端，一种是**“哈希表状态后端”**（HashMapStateBackend），另一种是**“内嵌RocksDB状态后端”**（EmbeddedRocksDBStateBackend）。如果没有特别配置，系统默认的状态后端是HashMapStateBackend。
+
+**HashMapStateBackend**：把状态存放在内存里。具体实现上，哈希表状态后端在内部会直接把状态当作对象（objects），保存在Taskmanager的JVM堆上。普通的状态，以及窗口中收集的数据和触发器，都会以键值对的形式存储起来，所以底层是一个哈希表（HashMap），这种状态后端也因此得名。
+
+**EmbeddedRocksDBStateBackend**：RocksDB是一种内嵌的key-value存储介质，可以把数据持久化到本地硬盘。配置EmbeddedRocksDBStateBackend后，会将处理中的数据全部放入RocksDB数据库中，RocksDB默认存储在TaskManager的本地数据目录里。
 
 
-## Flink SQL
+
+RocksDB的状态数据被存储为序列化的字节数组，读写操作需要序列化/反序列化，因此状态的访问性能要差一些。另外，因为做了序列化，key的比较也会按照字节进行，而不是直接调用.hashCode()和.equals()方法。
+
+EmbeddedRocksDBStateBackend始终执行的是异步快照，所以不会因为保存检查点而阻塞数据的处理；而且它还提供了增量式保存检查点的机制，这在很多情况下可以大大提升保存效率。
+
+#### 7.4.2.如何选择正确的状态后端
+
+HashMapStateBackend是内存计算，读写速度非常快；但是，状态的大小会受到集群可用内存的限制，如果应用的状态随着时间不停地增长，就会耗尽内存资源。
 
 
+
+而RocksDB是硬盘存储，所以可以根据可用的磁盘空间进行扩展，所以它非常适合于超级海量状态的存储。不过由于每个状态的读写都需要做序列化/反序列化，而且可能需要直接从磁盘读取数据，这就会导致性能的降低，平均读写性能要比HashMapStateBackend慢一个数量级。
+
+#### 7.4.3.状态后端的配置
+
+**配置默认的状态后端**
+
+在`flink-conf.yaml`中，可以使用`state.backend`来配置默认状态后端。
+
+配置demo：
+
+```yaml
+# 默认状态后端
+state.backend: hashmap
+
+# 存放检查点的文件路径
+state.checkpoints.dir: hdfs://hadoop102:8020/flink/checkpoints
+```
+
+这里的state.checkpoints.dir配置项，定义了检查点和元数据写入的目录。
+
+
+
+**为每个作业（Per-job/Application）单独配置状态后端**
+
+通过执行环境设置 HashMapStateBackend。
+
+```java
+
+StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(); 
+
+env.setStateBackend(new HashMapStateBackend());
+
+```
+
+通过执行环境设置 EmbeddedRocksDBStateBackend。
+```java
+StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+env.setStateBackend(new EmbeddedRocksDBStateBackend());
+```
+如果使用 EmbeddedRocksDBStateBackend 需要添加maven依赖：
+```xml
+<dependency>
+    <groupId>org.apache.flink</groupId>
+    <artifactId>flink-statebackend-rocksdb</artifactId>
+    <version>${flink.version}</version>
+</dependency>
+
+```
+
+## 8.容错机制
+
+8.1.检查点 CheckPoint
+
+8.2.状态一致性
+
+8.3.端到端精确一次
+
+## 9.Flink SQL
+
+### 9.1. sql-client准备
+
+#### 9.1.1.基于yarn模式
+
+### 9.2.流处理中的表
+
+9.3.时间属性
+
+9.4.DDL数据定义
+
+9.5.查询
+
+9.6.常用connector读写
+
+9.7.sql-client中使用save point
+
+9.8.Catlog
+
+9.9.代码中使用Flink Sql
 
