@@ -3833,7 +3833,17 @@ Table urlCountTable = tableEnv.sqlQuery("SELECT user, COUNT(url) as cnt FROM Eve
 
 **（2）追加（Append）查询**
 
+上面的例子中，查询过程用到了分组聚合，结果表中就会产生更新操作。如果我们执行一个简单的条件查询，结果表中就会像原始表EventTable一样，只有插入（Insert）操作了。
 
+```java
+Table aliceVisitTable = tableEnv.sqlQuery("SELECT url, user FROM EventTable WHERE user = 'Cary'");
+```
+
+这样的持续查询，就被称为追加查询（Append Query），它定义的结果表的更新日志（changelog）流中只有INSERT操作。
+
+![](pic/0031.png)
+
+由于窗口的统计结果是一次性写入结果表的，所以结果表的更新日志流中只会包含插入INSERT操作，而没有更新UPDATE操作。所以这里的持续查询，依然是一个追加（Append）查询。结果表result如果转换成`DataStream`，可以直接调用`toDataStream()`方法。
 
 #### 9.2.4.表转流
 
