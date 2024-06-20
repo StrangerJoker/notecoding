@@ -3965,11 +3965,199 @@ USE database_name;
 
 ##### 9.4.2.1.创建
 
+**（1）语法**
+
+```sql
+CREATE TABLE [IF NOT EXISTS] [catalog_name.][db_name.]table_name
+  (
+    { <physical_column_definition> | <metadata_column_definition> | <computed_column_definition> }[ , ...n]
+    [ <watermark_definition> ]
+    [ <table_constraint> ][ , ...n]
+  )
+  [COMMENT table_comment]
+  [PARTITIONED BY (partition_column_name1, partition_column_name2, ...)]
+  WITH (key1=val1, key2=val2, ...)
+  [ LIKE source_table [( <like_options> )] | AS select_query ]
+```
+
+**（1）physical_column_definition**:
+
+物理列是数据库中所说的常规列。其定义了物理介质中存储的数据中字段的名称、类型和顺序。其他类型的列可以在物理列之间声明，但不会影响最终的物理列的读取。
+
+**（2）metadata_column_definition**
+
+元数据列是 SQL 标准的扩展，允许访问数据源本身具有的一些元数据。元数据列由 METADATA 关键字标识。
+
+```java
+CREATE TABLE MyTable (
+  `user_id` BIGINT,
+  `name` STRING,
+  `record_time` TIMESTAMP_LTZ(3) METADATA FROM 'timestamp'
+) WITH (
+  'connector' = 'kafka'
+  ...
+);
+```
+
+**（3）computed_column_definition**
+
+计算列是使用语法column_name AS computed_column_expression生成的虚拟列。拿已有的一些列经过一些自定义的运算生成的新列，在物理上并不存储在表中，只能读不能写。
+
+```sql
+CREATE TABLE MyTable (
+  `user_id` BIGINT,
+  `price` DOUBLE,
+  `quantity` DOUBLE,
+  `cost` AS price * quanitity
+) WITH (
+  'connector' = 'kafka'
+  ...
+);
+```
+
+**（4）定义Watermark**
+
+Flink SQL 提供了几种 WATERMARK 生产策略：
+
+-  严格升序：`WATERMARK FOR rowtime_column AS rowtime_column`。Flink 任务认为时间戳只会越来越大，也不存在相等的情况，只要相等或者小于之前的，就认为是迟到的数据。
+- 递增：`WATERMARK FOR rowtime_column AS rowtime_column - INTERVAL '0.001' SECOND`，允许有相同的时间戳
+- 有界无序： `WATERMARK FOR rowtime_column AS rowtime_column – INTERVAL 'string' timeUnit `，可以用于设置最大乱序时间。例如设置为`WATERMARK FOR rowtime_column AS rowtime_column - INTERVAL '5' SECOND` ，则生成的是运行 5s 延迟的Watermark。
+
+**（5） PRIMARY KEY**
+
+主键约束表明表中的一列或一组列是唯一的，并且它们不包含NULL值。主键唯一地标识表中的一行，只支持 not enforced。
+
+```sql
+CREATE TABLE MyTable (
+`user_id` BIGINT,
+`name` STRING,
+PARYMARY KEY(user_id) not enforced
+) WITH (
+'connector' = 'kafka'
+...
+);
+```
+
+**（6） PARTITIONED BY**
+
+创建分区表
+
+**（7） with语句**
+
+用于创建表的表属性，用于指定外部存储系统的元数据信息。配置属性时，表达式key1=val1的键和值都应该是字符串字面值。例如Kafka表：
+
+```sql
+CREATE TABLE KafkaTable (
+`user_id` BIGINT,
+`name` STRING,
+`ts` TIMESTAMP(3) METADATA FROM 'timestamp'
+) WITH (
+'connector' = 'kafka',
+'topic' = 'user_behavior',
+'properties.bootstrap.servers' = 'localhost:9092',
+'properties.group.id' = 'testGroup',
+'scan.startup.mode' = 'earliest-offset',
+'format' = 'csv'
+)
+```
+
+一般 with 中的配置项由 Flink SQL 的 Connector（链接外部存储的连接器） 来定义，每种 Connector 提供的with 配置项都是不同的。
+
+**（8）like**
+
+用于基于现有表的定义创建表。此外，用户可以扩展原始表或排除表的某些部分。可以使用该子句重用(可能还会覆盖)某些连接器属性，或者向外部定义的表添加水印。
+
+```sql
+CREATE TABLE Orders (
+    `user` BIGINT,
+    product STRING,
+    order_time TIMESTAMP(3)
+) WITH ( 
+    'connector' = 'kafka',
+    'scan.startup.mode' = 'earliest-offset'
+);
+
+CREATE TABLE Orders_with_watermark (
+    -- Add watermark definition
+    WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND 
+) WITH (
+    -- Overwrite the startup-mode
+    'scan.startup.mode' = 'latest-offset'
+)
+LIKE Orders;
+```
+
+**（9） AS select_statement（CTAS）**
+
+在一个create-table-as-select (CTAS)语句中，还可以通过查询的结果创建和填充表。CTAS是使用单个命令创建数据并向表中插入数据的最简单、最快速的方法。
+
+```sql
+CREATE TABLE my_ctas_table
+WITH (
+    'connector' = 'kafka',
+    ...
+)
+AS SELECT id, name, age FROM source_table WHERE mod(id, 10) = 0;
+```
+
+CTAS有如下限制：
+
+- 暂不支持创建临时表。
+- 目前还不支持指定显式列。
+- 还不支持指定显式水印。
+- 目前还不支持创建分区表。
+- 目前还不支持指定主键约束。
+
+demo：
+
+```sql
+CREATE TABLE test(
+    id INT, 
+    ts BIGINT, 
+    vc INT
+) WITH (
+'connector' = 'print'
+);
+
+CREATE TABLE test1 (
+    `value` STRING
+)
+LIKE test;
+```
+
 ##### 9.4.2.2.查看
+
+**查看所有表**
+
+```sql
+SHOW TABLES [ ( FROM | IN ) [catalog_name.]database_name ] [ [NOT] LIKE <sql_like_pattern> ]
+```
+
+**查看表信息**
+
+```sql
+{ DESCRIBE | DESC } [catalog_name.][db_name.]table_name
+```
 
 ##### 9.4.2.3.修改
 
+**修改表名**
+
+```sql
+ALTER TABLE [catalog_name.][db_name.]table_name RENAME TO new_table_name
+```
+
+**修改表属性**
+
+```sql
+ALTER TABLE [catalog_name.][db_name.]table_name SET (key1=val1, key2=val2, ...)
+```
+
 ##### 9.4.2.4.删除
+
+```sql
+DROP [TEMPORARY] TABLE [IF EXISTS] [catalog_name.][db_name.]table_name
+```
 
 ### 9.5.查询
 
