@@ -4161,6 +4161,361 @@ DROP [TEMPORARY] TABLE [IF EXISTS] [catalog_name.][db_name.]table_name
 
 ### 9.5.查询
 
+#### 9.5.1.DataGen & Print
+
+（1）创建数据生成器源表
+
+```sql
+CREATE TABLE source ( 
+    id INT, 
+    ts BIGINT, 
+    vc INT
+) WITH ( 
+    'connector' = 'datagen', 
+    'rows-per-second'='1', 
+    'fields.id.kind'='random', 
+    'fields.id.min'='1', 
+    'fields.id.max'='10', 
+    'fields.ts.kind'='sequence', 
+    'fields.ts.start'='1', 
+    'fields.ts.end'='1000000', 
+    'fields.vc.kind'='random', 
+    'fields.vc.min'='1', 
+    'fields.vc.max'='100'
+);
+
+CREATE TABLE sink (
+    id INT, 
+    ts BIGINT, 
+    vc INT
+) WITH (
+'connector' = 'print'
+);
+```
+
+（2）查询源表
+
+```sql
+select * from source
+```
+
+（3）插入sink表并查询
+
+```sql
+INSERT INTO sink select  * from source;
+select * from sink;
+```
+
+
+
+#### 9.5.2.With子句
+
+`WITH`提供了一种编写辅助语句的方法，以便在较大的查询中使用。这些语句通常被称为公共表表达式(Common Table Expression, CTE)，可以认为它们定义了仅为一个查询而存在的临时视图。
+
+**1）语法**
+
+```sql
+WITH <with_item_definition> [ , ... ]
+SELECT ... FROM ...;
+
+<with_item_defintion>:
+    with_item_name (column_name[, ...n]) AS ( <select_query> )
+```
+
+**2）案例**
+
+```sql
+WITH source_with_total AS (
+    SELECT id, vc+10 AS total
+    FROM source
+)
+
+SELECT id, SUM(total)
+FROM source_with_total
+GROUP BY id;
+```
+
+#### 9.5.3.SELECT & WHERE
+
+语法
+
+```sql 
+SELECT select_list FROM table_expression [ WHERE boolean_expression ]
+```
+
+#### 9.5.4.**SELECT DISTINCT 子句**
+
+使用key对数据去重
+
+`SELECT DISTINCT vc FROM source`
+
+对于流查询，计算查询结果所需的状态可能无限增长。状态大小取决于不同行数。可以设置适当的状态生存时间(TTL)的查询配置，以防止状态过大。但是，这可能会影响查询结果的正确性。如某个 key 的数据过期从状态中删除了，那么下次再来这么一个 key，由于在状态中找不到，就又会输出一遍。
+
+#### 9.5.5. **分组聚合**
+
+SQL中一般所说的聚合我们都很熟悉，主要是通过内置的一些聚合函数来实现的，比如`SUM()`、`MAX()`、`MIN()`、`AVG()`以及`COUNT()`。即输入多条，输出一条。
+
+而更多的情况下，我们可以通过`GROUP BY`子句来指定分组的键（`key`），从而对数据按照某个字段做一个分组统计。
+
+```sql
+SELECT vc, COUNT(*) as cnt FROM source GROUP BY vc;
+```
+
+如果在代码中直接转换成`DataStream`打印输出，需要调用`toChangelogStream()`。
+
+**（1）group聚合案例**
+
+```sql
+CREATE TABLE source1 (
+dim STRING,
+user_id BIGINT,
+price BIGINT,
+row_time AS cast(CURRENT_TIMESTAMP as timestamp(3)),
+WATERMARK FOR row_time AS row_time - INTERVAL '5' SECOND
+) WITH (
+'connector' = 'datagen',
+'rows-per-second' = '10',
+'fields.dim.length' = '1',
+'fields.user_id.min' = '1',
+'fields.user_id.max' = '100000',
+'fields.price.min' = '1',
+'fields.price.max' = '100000'
+);
+
+
+CREATE TABLE sink1 (
+dim STRING,
+pv BIGINT,
+sum_price BIGINT,
+max_price BIGINT,
+min_price BIGINT,
+uv BIGINT,
+window_start bigint
+) WITH (
+'connector' = 'print'
+);
+
+
+insert into sink1
+select dim,
+count(*) as pv,
+sum(price) as sum_price,
+max(price) as max_price,
+min(price) as min_price,
+-- 计算 uv 数
+count(distinct user_id) as uv,
+cast((UNIX_TIMESTAMP(CAST(row_time AS STRING))) / 60 as bigint) as window_start
+from source1
+group by
+dim,
+-- UNIX_TIMESTAMP得到秒的时间戳，将秒级别时间戳 / 60 转化为 1min， 
+cast((UNIX_TIMESTAMP(CAST(row_time AS STRING))) / 60 as bigint)
+```
+
+**（2）多维分析**
+
+Group 聚合也支持 Grouping sets 、Rollup 、Cube，如下案例是Grouping sets：
+
+```sql
+SELECT
+  supplier_id
+, rating
+, product_id
+, COUNT(*)
+FROM (
+VALUES
+  ('supplier1', 'product1', 4),
+  ('supplier1', 'product2', 3),
+  ('supplier2', 'product3', 3),
+  ('supplier2', 'product4', 4)
+)
+-- 供应商id、产品id、评级
+AS Products(supplier_id, product_id, rating)  
+GROUP BY GROUPING SETS(
+  (supplier_id, product_id, rating),
+  (supplier_id, product_id),
+  (supplier_id, rating),
+  (supplier_id),
+  (product_id, rating),
+  (product_id),
+  (rating),
+  ()
+);
+```
+
+#### 9.5.6.分组窗口聚合
+
+从1.13版本开始，分组窗口聚合已经标记为过时，鼓励使用更强大、更有效的**窗口TVF聚合**，在这里简单做个介绍。
+
+SQL中只支持基于时间的窗口，不支持基于元素个数的窗口。
+
+| 分组窗口函数                        | 描述                                                         |
+| ----------------------------------- | ------------------------------------------------------------ |
+| TUMBLE(time_attr,  interval)        | 定义一个滚动窗口。滚动窗口把行分配到有固定持续时间（ interval ）的不重叠的连续窗口。比如，5 分钟的滚动窗口以 5 分钟为间隔对行进行分组。滚动窗口可以定义在事件时间（批处理、流处理）或处理时间（流处理）上。 |
+| HOP(time_attr,  interval, interval) | 定义一个跳跃的时间窗口（在 Table API 中称为滑动窗口）。滑动窗口有一个固定的持续时间（ 第二个 interval 参数 ）以及一个滑动的间隔（第一个 interval 参数 ）。若滑动间隔小于窗口的持续时间，滑动窗口则会出现重叠；因此，行将会被分配到多个窗口中。比如，一个大小为 15 分组的滑动窗口，其滑动间隔为 5 分钟，将会把每一行数据分配到 3 个 15 分钟的窗口中。滑动窗口可以定义在事件时间（批处理、流处理）或处理时间（流处理）上。 |
+| SESSION(time_attr,  interval)       | 定义一个会话时间窗口。会话时间窗口没有一个固定的持续时间，但是它们的边界会根据 interval 所定义的不活跃时间所确定；即一个会话时间窗口在定义的间隔时间内没有时间出现，该窗口会被关闭。例如时间窗口的间隔时间是 30 分钟，当其不活跃的时间达到30分钟后，若观测到新的记录，则会启动一个新的会话时间窗口（否则该行数据会被添加到当前的窗口），且若在 30 分钟内没有观测到新纪录，这个窗口将会被关闭。会话时间窗口可以使用事件时间（批处理、流处理）或处理时间（流处理）。 |
+
+![](pic/0034.png)
+
+**demo**
+
+（1）准备数据
+
+```sql
+CREATE TABLE ws (
+  id INT,
+  vc INT,
+  pt AS PROCTIME(), --处理时间
+  et AS cast(CURRENT_TIMESTAMP as timestamp(3)), --事件时间
+  WATERMARK FOR et AS et - INTERVAL '5' SECOND   --watermark
+) WITH (
+  'connector' = 'datagen',
+  'rows-per-second' = '10',
+  'fields.id.min' = '1',
+  'fields.id.max' = '3',
+  'fields.vc.min' = '1',
+  'fields.vc.max' = '100'
+);
+
+```
+
+（2）滚动窗口（时间字段、窗口长度）
+
+```sql
+select  
+id,
+TUMBLE_START(et, INTERVAL '5' SECOND)  wstart,
+TUMBLE_END(et, INTERVAL '5' SECOND)  wend,
+sum(vc) sumVc
+from ws
+group by id, TUMBLE(et, INTERVAL '5' SECOND);
+```
+
+（3）滑动窗口（时间字段、滑动步长、窗口长度）
+
+```sql
+select  
+id,
+HOP_START(pt, INTERVAL '3' SECOND,INTERVAL '5' SECOND)   wstart,
+HOP_END(pt, INTERVAL '3' SECOND,INTERVAL '5' SECOND)  wend,
+   sum(vc) sumVc
+from ws
+group by id, HOP(et, INTERVAL '3' SECOND,INTERVAL '5' SECOND);
+```
+
+（4）会话窗口
+
+```sql
+select  
+id,
+SESSION_START(et, INTERVAL '5' SECOND)  wstart,
+SESSION_END(et, INTERVAL '5' SECOND)  wend,
+sum(vc) sumVc
+from ws
+group by id, SESSION(et, INTERVAL '5' SECOND);
+```
+
+#### 9.5.7.窗口表值函数（TVF）聚合
+
+对比GroupWindow，TVF窗口更有效和强大。包括：
+
+- 提供更多的性能优化手段
+- 支持GroupingSets语法
+- 可以在window聚合中使用TopN
+- 提供累积窗口
+
+对于窗口表值函数，窗口本身返回的是就是一个表，所以窗口会出现在FROM后面，GROUP BY后面的则是窗口新增的字段`window_start`和`window_end`
+
+```sql
+FROM TABLE(
+窗口类型(TABLE 表名, DESCRIPTOR(时间字段),INTERVAL时间…)
+)
+GROUP BY [window_start,][window_end,] --可选
+```
+
+**（1）滚动窗口**
+
+```sql
+SELECT 
+window_start, 
+window_end, 
+id , SUM(vc) 
+sumVC
+FROM TABLE(
+  TUMBLE(TABLE ws, DESCRIPTOR(et), INTERVAL '5' SECONDS))
+GROUP BY window_start, window_end, id;
+```
+
+
+
+**（2）滑动窗口**
+
+要求： 窗口长度=滑动步长的整数倍（底层会优化成多个小滚动窗口）
+
+```sql
+SELECT window_start, window_end, id , SUM(vc) sumVC
+FROM TABLE(
+  HOP(TABLE ws, DESCRIPTOR(et), INTERVAL '5' SECONDS , INTERVAL '10' SECONDS))
+GROUP BY window_start, window_end, id;
+```
+
+
+
+**（3）累计窗口**
+
+累积窗口会在一定的统计周期内进行累积计算。累积窗口中有两个核心的参数：最大窗口长度（max window size）和累积步长（step）。
+
+- 最大窗口长度：统计周期
+- 累计步长：每隔步长的时间触发窗口
+
+累积窗口可以认为是首先开一个最大窗口大小的滚动窗口，然后根据用户设置的触发的时间间隔将这个滚动窗口拆分为多个窗口，这些窗口具有相同的窗口起点和不同的窗口终点。**窗口最大长度 = 累积步长的整数倍**
+
+![](pic/0035.png)
+
+**（4）grouping sets多维分析**
+
+```sql
+SELECT 
+window_start, 
+window_end, 
+id , 
+SUM(vc) sumVC
+FROM TABLE(
+  TUMBLE(TABLE ws, DESCRIPTOR(et), INTERVAL '5' SECONDS))
+GROUP BY window_start, window_end,
+rollup( (id) )
+--  cube( (id) )
+--  grouping sets( (id),()  )
+;
+```
+
+#### 9.5.8.Over聚合
+
+OVER聚合为一系列有序行的每个输入行计算一个聚合值。与GROUP BY聚合相比，OVER聚合不会将每个组的结果行数减少为一行。相反，**OVER聚合为每个输入行生成一个聚合值**。
+
+（1）语法
+
+```sql
+SELECT
+  agg_func(agg_col) OVER (
+    [PARTITION BY col1[, col2, ...]]
+    ORDER BY time_col
+    range_definition),
+  ...
+FROM ...
+```
+
+- ORDER BY：必须是时间戳列（事件时间、处理时间），只能升序
+- PARTITION BY：标识了聚合窗口的聚合粒度
+- range_definition：这个标识聚合窗口的聚合数据范围，在 Flink 中有两种指定数据范围的方式。第一种为按照行数聚合，第二种为按照时间区间聚合
+
+**（2）案例**：
+a. 按照时间区间聚合
+
+
+
+b.按照行数聚合
+
 ### 9.6.常用connector读写
 
 ### 9.7.sql-client中使用save point
