@@ -627,8 +627,55 @@ Yarn状态的查询，除了可以在hadoop103:8088页面查看外，还可以�
 
 - yarn logs 查看日志
   - yarn logs -applicationId {ApplicationId}：查询指定app的日志
-  - yarn logs -applicationId <ApplicationId> -containerId <ContainerId> ：查询指定app的Container的日志
+  - yarn logs -applicationId {ApplicationId} -containerId {ContainerId} ：查询指定app的Container的日志
 - yarn applicationattempt ：看尝试运行的任务
-  - yarn applicationattempt -list <ApplicationId>：
+  - yarn applicationattempt -list {ApplicationId}：列出所有Application尝试的列表
+  - yarn applicationattempt -status {ApplicationAttemptId}：打印ApplicationAttemp状态
+- yarn container查看容器
+  - yarn container -list {ApplicationAttemptId}：列出所有Container
+  - yarn container -status {ContainerId}：打印Container状态
+
+- yarn node查看节点状态
+  - yarn node -list -all：列出所有节点
+- yarn rmadmin更新配置
+  - yarn rmadmin -refreshQueues：加载队列配置
+- yarn queue查看队列
+  - yarn queue -status {QueueName}：打印队列信息
 
 ### 4.6.Yarn生成环境核心参数
+
+#### 4.6.1.ResourceManager相关
+
+yarn.resourcemanager.scheduler.class 配置调度器，默认容量调度器
+
+yarn.resourcemanager.scheduler.client.thread-count  ResourceManager处理调度请求的线程数量，默认50
+
+#### 4.6.2.NodeManager相关
+
+yarn.nodemanager.resource.detect-hardware-capabilities 是否让yarn自己检测硬件进行配置，默认false
+
+yarn.nodemanagerresource.count-logical-processors-as-cores 是否将虚拟核数当作CPU核数，默认false
+
+yarn.nodemanager.resource.pcores-vcores-multiplier 虚拟核数和物理核数乘数，例如:4核8线程，该参数就应设为2，默认1.0
+
+yarn.nodemanager.resource.memory-mb NodeManager使用内存，默认8G
+
+yarn.nodemanager.resource.system-reserved-memory-mb   NodeManager为系统保留多少内存
+
+yarn.nodemanager.resource.cpu-vcores NodeManager使用CPU核数，默认为8个
+
+yarn.nodemanager.pmem-check-enabled 是否开启物理内存检查限制Container，默认打开
+
+yarn.nodemanager.vmem-check-enabled 是否开启虚拟内存检查限制Container，默认打开
+
+yarn.nodemanager.vmem-pmem-ratio 虚拟内存物理内存比例，默认2:1
+
+#### 4.6.3.Container相关
+
+yarn.scheduler.mininum-allocation-mb 容器最小内存，默认1G
+
+yarn.scheduler.maxinum-allocation-mb 容器最大内存，默认1G
+
+yarn.scheduler.mininum-allocation-vcores 容器最小CPU核数，默认1
+
+yarn.scheduler.maxinum-allocation-vcores 容器最大CPU核数，默认1个
