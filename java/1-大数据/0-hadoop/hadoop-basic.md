@@ -271,13 +271,15 @@ hadoop104
 hdfs namenode -format
 ```
 
+如果不是第一次启动，则需删除每个节点下的 `$HADOOP_HOME/data`和`$HADOOP_HOME/logs`目录，然后执行命令。
+
 **启动HDFS**
 
 ```shell
 bash sbin/start-dfs.sh
 ```
 
-**启动yarn**
+**启动yarn**：在配置了ResourceManager的节点运行
 
 ```11111110000000000000shell
 bash sbin/start-yarn.sh
@@ -318,6 +320,8 @@ yarn：查看ResourceManager，http://hadoop103:8088
 **在hadoop102启动历史服务器**
 
 `mapred --daemon start historyserver`
+
+`mapred --daemon stop historyserver`
 
 WEB端查看历史服务器：http://hadoop102:19888/jobhistory
 

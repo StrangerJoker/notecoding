@@ -253,15 +253,69 @@ Flink的Standalone集群并不支持单作业模式部署。因为单作业模�
 
 ### 2.5.Yarn运行模式
 
+#### 2.5.0.相关准备和配置
+
+在将Flink任务部署至YARN集群之前，需要确认集群是否安装有Hadoop，保证Hadoop版本至少在2.2以上，并且集群中安装有HDFS服务。
+
+配置步骤：
+
+- 配置环境变量，增加环境变量配置如下：
+
+  ```shell
+  $ sudo vim /etc/profile.d/my_env.sh
+  
+  HADOOP_HOME=/opt/module/hadoop-3.3.4
+  export PATH=$PATH:$HADOOP_HOME/bin:$HADOOP_HOME/sbin
+  export HADOOP_CONF_DIR=${HADOOP_HOME}/etc/hadoop
+  export HADOOP_CLASSPATH=`hadoop classpath`
+  ```
+
+- 启动Hadoop集群，包括hdfs和yarn
+
+  ```shell
+  start-dfs.sh
+  start-yarn.sh
+  ```
+
+  
+
+#### 2.5.1.会话部署模式
+
+YARN的会话模式与独立集群略有不同，需要首先申请一个YARN会话（YARN Session）来启动Flink集群。具体步骤如下：
+
+**（1）启动集群**
+
+- 启动Hadoop集群（HDFS、YARN）。
+
+- 执行脚本命令向YARN集群申请资源，开启一个YARN会话，启动Flink集群。
+
+  ```shell
+  bin/yarn-session.sh -nm test
+  ```
+
+  可用参数：
+
+  - -d：不想让Flink YARN客户端一直前台运行，可以使用这个参数，即使关掉当前对话窗口，YARN session也可以后台运行。
+  - -jm（--jobManagerMemory）：配置JobManager所需内存，默认单位MB。
+  - -nm（--name）：配置在YARN UI界面上显示的任务名。
+  - -qu（--queue）：指定YARN队列名。
+  - -tm（--taskManager）：配置每个TaskManager所使用内存。
+
+  Flink1.11.0版本不再使用-n参数和-s参数分别指定TaskManager数量和slot数量，**YARN会按照需求动态分配TaskManager和slot**。所以从这个意义上讲，YARN的会话模式也不会把集群资源固定，同样是动态分配的。
+
+  YARN Session启动之后会给出一个Web UI地址以及一个YARN application ID，如下所示，用户可以通过Web UI或者命令行两种方式提交作业。
+
+  ![](pic/0036.png)
+
+  ![](pic/0037.png)
+
+**（2）关闭集群**
+
+```yarn app -kill app_id```
 
 
-#### 2.5.1.相关准备和配置
 
-#### 2.5.2.会话部署模式
-
-#### 2.5.3.单作业部署模式
-
-#### 2.5.4.应用部署模式
+#### 2.5.3.应用模式部署
 
 ### 2.6.K8S运行模式（了解）
 
@@ -3709,11 +3763,31 @@ env.setStateBackend(new EmbeddedRocksDBStateBackend());
 
 ## 8.容错机制
 
-8.1.检查点 CheckPoint
+### 8.1.检查点 CheckPoint
 
-8.2.状态一致性
+#### 8.1.1.检查点的保存
 
-8.3.端到端精确一次
+#### 8.1.2.从检查点恢复状态
+
+#### 8.1.3.检查点算法
+
+#### 8.1.4.检查点配置
+
+##### 8.1.4.1.启动检查点
+
+### 8.2.状态一致性
+
+#### 8.2.1.一致性的概念和级别
+
+#### 8.2.2.端到端的状态一致性
+
+### 8.3.端到端精确一次
+
+#### 8.3.1.输入端保证
+
+#### 8.3.2.输出端保证
+
+#### 8.3.3.Flink和Kafka连接时的精确一次保证
 
 ## 9.Flink SQL
 
