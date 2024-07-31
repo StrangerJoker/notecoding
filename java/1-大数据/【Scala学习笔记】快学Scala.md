@@ -1535,33 +1535,740 @@ Scala没有只带一个组件的元祖，如果unapply要提取单值，则返�
 
 ### 12.1、作为值的函数
 
+可以在变量中存放函数：
+
+- 调用函数
+- 作为参数传递函数
+
+```scala
+object ch12_1 {
+  def main(args: Array[String]): Unit = {
+    val num = 3.14
+    val func = math.ceil _ // _ 运算符 将 ceil方法变成了函数
+    val func1: (Double) => Double = math.ceil // 不需要 _
+    val doubles = Array(1.1, 2.2, 3.4).map(func1)
+    println(doubles.mkString("Array(", ", ", ")")) // Array(2.0, 3.0, 4.0)
+  }
+}
+```
+
+
+
 ### 12.2、匿名函数
+
+有时候无需给出函数名
+
+```scala
+    val ints = Array(1, 2, 3, 4, 5).map((x: Int) => x * 3 + 1)
+    println(ints.mkString("Array(", ", ", ")")) // Array(4, 7, 10, 13, 16)
+```
+
+> 任何以def定义的都是方法，不是函数
 
 ### 12.3、带函数参数的函数
 
+**函数作为函数的参数。**函数的类型可以写为：
+
+```scala
+(参数类型) => 结果类型
+```
+
+```scala
+object ch12_3 {
+  def main(args: Array[String]): Unit = {
+    println(valueAtOneQuarter(math.ceil))
+  }
+
+  def valueAtOneQuarter(f: (Double) => Double) = f(0.25)
+}
+```
+
+`valueAtOneQuarter`的类型为 `((Double) => Double) => Double`
+
+**此外函数还可以作为函数的返回值**
+
+```scala
+def multiBy(factor: Double) = (x: Double) => factor * x
+
+//call
+  println(multiBy(3)(20))
+```
+
+其返回类型为`(Double) => (Double => Double)`
+
 ### 12.4、参数（类型）推断
+
+参数类型推断有助于节省代码量。 不必写 `(x:Double) => x * 3` ，直接写 `(Double) => _ * 3` 或则`(x) => x * 3`
 
 ### 12.5、一些有用的高阶函数
 
+map、filter等
+
 ### 12.6、闭包
+
+闭包：函数/变量 在不再处于作用域范围内的地方被调用/使用。
+
+```scala
+def multiBy(factor: Double) = (x: Double) => factor * x
+// call
+    val triple = multiBy(3)
+    val half = multiBy(0.5)
+    println(s"${triple(33)} ${half(10)}")
+```
+
+上述代码，第一次调用时 factor为 3，第二次为0.5。每一个返回的函数都有自己的factor设置。
 
 ### 12.7、SAM转换
 
+Single Abstract Method，类似于Java 的函数式接口
+
 ### 12.8、科里化
 
-### 12.9、控制抽象
+函数科里化：将原来接收两个参数的函数变成新的接受一个参数的函数的过程。新的函数返回原有第二个参数作为参数的函数。
 
-### 12.10、return 表达式
+```scala
+object ch12_8 {
+  def main(args: Array[String]): Unit = {
+    val mul = (x: Int, y: Int) => x * y
+    val mulOneAtOneTime = (x: Int) => ((y: Int) => x * y)
+    println(s"计算两个数的乘积: ${mul(3, 4)}")
+    println(s"计算两个数的乘积: ${mulOneAtOneTime(3)(4)}")
+    println(s"计算两个数的乘积: ${mulOneAtOneTime1(3)(4)}")
+    // 定义函数
+    val mulOneAtOneTime2 = (x:Int) => (y:Int) => x * y  // 函数类型是  Int => (Int  => Int)
+    println(s"计算两个数的乘积: ${mulOneAtOneTime2(3)(4)}")
 
-## 13、集合
+
+    val a = Array("Hello", "World")
+    val b = Array("Hello", "World")
+    println(a.corresponds(b)(_.equalsIgnoreCase(_)))
+  }
+
+  // 定义方法 简写形式
+  def mulOneAtOneTime1(x: Int)(y: Int) = x * y  // 方法类型是： (x:Int)(y:Int)Int
+}
+```
+
+上述代码的 corresponds 方法是典型的科里化，其定义为：
+
+```scala
+def corresponds[B](that: _root_.scala.collection.GenSeq[B])(p: (A, B) => _root_.scala.Boolean): _root_.scala.Boolean = ???
+```
+
+
+
+### 12.9、控制抽象(doing)
+
+### 12.10、return 表达式(doing)
+
+## 13、集合(doing)
+
+### 13.1、主要的集合特质
+
+![](https://i-blog.csdnimg.cn/blog_migrate/e4fdea6b73d4869b9d28aee38658679e.png)
+
+所有Scala都扩展自 Iterable：
+
+- Seq：又先后次序的值的序列
+- Set：一组没有先后次序的值
+- Map：一组对偶
+
+每个Scala集合都有一个伴生对象，里面有一个apply方法， apply方法可以用来构建该集合中的实例。
+
+### 13.2、可变和不可变集合
+
+Scala同时支持可变和不可变集合，推荐使用不可变集合。对不可变集合的更新操作（如插入值，remove值）都会生成一个新的集合。
+
+Predef对象里还有指向不可变特质的类型别名List，Set，Map。
+
+**不可变集合继承类图**
+
+![在这里插入图片描述](https://img-blog.csdnimg.cn/7e69849f50d14d2eb791f79aee3d22ba.png?x-oss-process=image/watermark,type_d3F5LXplbmhlaQ,shadow_50,text_Q1NETiBA6I-c6I-c55qE5aSn5pWw5o2u5byA5Y-R5LmL6Lev,size_19,color_FFFFFF,t_70,g_se,x_16#pic_center)
+
+
+
+**可变集合继承类图**
+
+![](https://img-blog.csdnimg.cn/3812e608086441f8ba830b2d22c02b43.png?x-oss-process=image/watermark,type_d3F5LXplbmhlaQ,shadow_50,text_Q1NETiBA6I-c6I-c55qE5aSn5pWw5o2u5byA5Y-R5LmL6Lev,size_20,color_FFFFFF,t_70,g_se,x_16#pic_center)
+
+### 13.3、序列
+
+vector是ArrayBuffer的不可变版本：一个带下标的序列，快速支持随机访问，vector是以树结构的形式实现的。
+
+range是一个整数序列。range只是存储序列的起始值，接收值和步长，不会存储数据。 可以用to 和until生成range
+
+### 13.4、列表
+
+在Scala中，列表要么是Nil（空表），要么是一个head元素加上一个tail，而tail又是一个列表。
+
+`::`操作符从给定的头和尾创建一个新的列表。 `::`是右结合的，列表从末尾开始创建。
+
+可变 的列表：ListBuffer，由链表支撑的数据结构。
+
+### 13.5、集
+
+Set
+
+LinkedHashSet
+
+SortedSet
+
+方法：
+
+- contains
+- subsetOf
+- union ， ++
+- intersect
+- diff，--
+
+### 13.6、用于添加或去除元素的操作符 （doing）
+
+
+
+### 13.7、常用方法（doing）
+
+### 13.8、将函数映射到集合
+
+map：将函数应用到集合中的每个元素，并交出其结果。
+
+flatMap：和map一样，不过每个元素返回的是多个值。
+
+transfer：和map一样，不过是当场执行。应用与可变结合
+
+collect：用于偏函数
+
+groupBy：返回一个映射，key是函数求值后的值，value是函数求值得到给定键的元素的集合。
+
+### 13.9、化简、折叠和扫描（doing）
+
+### 13.10、拉链操作
+
+zip：将 左右两个集合 组合成一个个对偶的列表
+
+zipAll：和zip一样，不过当两个集合长度不一样时，则最终长度是取最小值
+
+### 13.11、迭代器
+
+`集合.iterator`方法从集合获取一个迭代器，然后使用 next 和 hashNext 方法遍历集合中的元素。
+
+在调用 map, filter, count, sum,  length 方法后，迭代器将位于集合尾端。
+
+### 13.12、流
+
+流是一个尾部被懒计算的不可变的列表。
+
+`#::` 操作符用于构建一个流，其中流的尾部是未求值的。
+
+- 使用 `.tall()`强制对下一个元素求值
+- 想要得到多个答案，使用`.take(n)`方法，然后调用`force`，切勿直接调用force，否则oom
+
+```scala
+object ch13_12 {
+  def main(args: Array[String]): Unit = {
+    val tenOrMore = numsForm(10)
+    println(tenOrMore)
+    println(tenOrMore.tail)
+    println(tenOrMore.tail.tail)
+
+
+    println(tenOrMore.take(5).force)
+  }
+  def numsForm(n: Int): Stream[BigInt] = n #:: numsForm(n + 1)
+}
+```
+
+
+
+### 13.13、懒试图
+
+对集合应用`view`方法也能得到流式处理的效果。
+
+- 试图不会缓存任何值，再次使用未求值的集合会重新计算。
+
+```scala
+object ch13_13 {
+  def main(args: Array[String]): Unit = {
+    val pal = (1 to 1000000).view.map(x => x * x).filter(x => x.toString == x.toString.reverse)
+    val col = pal.take(10).mkString(",") 
+    println(col)
+  }
+}
+```
+
+
+
+### 13.14、与Java集合的互操作
+
+使用JavaConversions 提供的转换方法。
+
+### 13.15、并行集合
+
+`par`方法产生一个当前集合的并发实现。
+
+par方法返回的并行集合属于扩展自ParSeq、ParSet、ParMap特质的类型。
+
+par方法能够应用的条件：操作符必须是**结合的**，就是`(a op b) op c` 等价于 `a op (b op c)`
+
+```scala
+object ch13_15 {
+  def main(args: Array[String]): Unit = {
+    val coll = (1 to 30).toList
+    println(coll.par.count(_ % 2 == 0))
+    println(coll.par.sum)
+  }
+}
+```
+
+并行集合使用的是全局的fork-join线程池
 
 ## 14、模式匹配和样例类
 
-## 15、注解
+### 14.1、更好的switch
 
-## 16、XML出路
+scala的模式匹配案例：
+
+```scala
+
+object ch14_1 {
+  def main(args: Array[String]): Unit = {
+    var ch = '+'
+    val sign = ch match {
+      case '+' => 1
+      case '-' => -1
+      case _ => 0
+    }
+    
+    var str = "0x"
+    val strSign = str match {
+      case "0" | "0x" | "0X" => 1
+      case _ => -1
+    }
+  }
+
+}
+```
+
+跟switch不同，scala的模式匹配不会意外调入下一分支。
+
+使用 `|` 符号分隔多个选项
+
+### 14.2、守卫
+
+自己理解：模式匹配case后的语句是一个表达式，默认是 `ch equals 这个值`，然而也可以直接写一个表达式，整个表达式就是守卫，守卫可以是任何boolean条件。
+
+模式总是自上而下匹配的，如果守卫整个模式不匹配，则匹配下一个模式。
+
+```scala
+object MatchDemo {
+  def main(args: Array[String]): Unit = {
+    var str = "3+4-22s"
+
+    for (ch <- str) {
+      var res = ch match {
+        case _ if Character.isDigit(ch) => Character.digit(ch, 10) // 守卫
+        case '+' => 1
+        case '-' => -1
+        case _ => 0
+      }
+      println(res )
+    }
+  }
+
+}
+```
+
+
+
+### 14.3、模式中的变量
+
+如果case表达式后接一个变量名，那么给这个变量赋值。`case _`就是一种特殊的情况，变量名是`_`。
+
+```scala
+str(i) match {
+    case ch => ....
+}
+```
+
+
+
+### 14.4、类型模式
+
+对表达式的类型进行匹配。更推荐使用模式匹配，而不是 isInstanceOf 函数。
+
+模式匹配的时候，必须要给出一个变量名。
+
+**注意：**不要对泛型进行模式匹配，即 `case Map[Int, String]`，直接使用一个通用的匹配`case Map[_,_]`
+
+```scala
+object ch14_4 {
+  def main(args: Array[String]): Unit = {
+    val obj: Int = 13
+    val res = obj match {
+      case x: Int => x
+      case s: String => s.toInt
+      case _: BigInt => Int.MaxValue
+      case _: => 0
+    }
+    println(res)
+  }
+
+}
+```
+
+
+
+### 14.5、匹配数组、列表和元祖
+
+**数组**
+
+- 第一个匹配数组只含有一个0的数组
+- 第二个匹配任何只有两个元素的数组
+- 第三个匹配任何以0开始的数组
+
+```scala
+object ch14_5 {
+  def main(args: Array[String]): Unit = {
+    val arr = Array(0/*, 1*//*, 2, 3, 4*/)
+    val res = arr match {
+      case Array(0) => "0"
+      case Array(x, y) => s"$x,$y"
+      case Array(0, _*) => "0 ..."
+      case _ => "something else"
+    }
+    println(res)
+  }
+
+}
+```
+
+如果匹配到 `_*`的可变长度参数绑定到变量，可以使用 `@`表示法：
+
+```scala
+case Array(x, rest @ _*) => rest.min
+```
+
+
+
+**列表**：以数组同样的方式匹配列表
+
+```scala
+val list = List(0, 1, 2, 3, 4)
+var res1 = list match {
+  case 0 :: Nil => "0"
+  case x :: y :: Nil => s"$x, $y"
+  case 0::tail => "0 ..."
+  case _ => "something else"
+}
+println(res1)
+```
+
+
+
+**元祖**
+
+```scala
+  val pair = (1,2)
+  val res2 = pair match {
+    case (0, _) => "0..."
+    case (y, 0) => s"$y 0"
+    case _ => "neither is 0"
+  }
+  println(res2)
+}
+```
+
+上述代码，将变量绑定到元祖的不同部分。
+
+**如果模式有不同的可选分支，不能使用除下划线外的其他变量名**
+
+```scala
+pair match {
+    case (x,_) | (_,y) => ...   // OK
+    case (x, 0) | (0, y) => .... //error  不能对可选分支做变量名绑定
+}
+```
+
+
+
+### 14.6、提取器
+
+14.5 的原理背后是提取器：带有从对象中提取值的`unapply`方法和`unapplySeq`方法对象。unapply 提取一个值，unapplySeq提取多个值（序列）
+
+Array的伴生对象就是一个提取器。
+
+对于14.5的模式匹配代码，首先是调用提取器，提取一个序列的值，然后再按照规则进行匹配。
+
+### 14.7、变量声明中的模式
+
+在变量声明的时候利用模式
+
+```scala
+object ch14_7 {
+  def main(args: Array[String]): Unit = {
+    val (x, y) = (1,2) 
+    val (q, r) = BigInt(10) /% 3  // /%  操作符返回商和余
+    val array = (1 to 10).toArray
+    val Array(first , second, rest @ _*) = array  // 第一个赋值给first，第二个赋值为second，剩下的赋值给rest
+  }
+
+}
+```
+
+### 14.8、for表达式中的模式
+
+在for表达式内，使用带变量的模式，对每一个遍历的值，这些变量都会被绑定。
+
+````scala
+for ((k ,v) <- System.getProperties()) {} 
+````
+
+甚至可以在之后加上守卫
+
+```scala
+for ((k ,v) <- System.getProperties() if v == "") {} 
+//等价于
+for ((k ,"") <- System.getProperties()) {} 
+```
+
+
+
+### 14.9、样例类
+
+一种特殊的类，经过优化以被用于模式匹配。
+
+```scala
+object ch14_9 {
+  def main(args: Array[String]): Unit = {
+    val amt: Amount = Dollar(11.1)
+
+    val str = amt match {
+      case Dollar(v) => s"$$$v"
+      case Currency(_, u) => s"Oh noes, I got $u"
+      case Nothing => ""
+    }
+    println(str)
+  }
+
+}
+
+abstract class Amount
+
+case class Dollar(value: Double) extends Amount
+
+case class Currency(value: Double, unit: String) extends Amount
+
+case object Nothing extends Amount
+```
+
+> 样例类要使用 `()`
+>
+> 样例对象不适用`()`
+
+声明样例类的时候，会自动发生几件事情：
+
+- 构造器中的每个参数都成为val，除非显示地声明为var
+- 在伴生对象中提供 apply 方法，生成对象是不适用new
+- 提供unapply方法让模式匹配能够自动工作
+- 将生成 toString、equals、hashcode 和 copy方法——除非重写这些方法
+
+除了上面几点，样例类跟类完全一样。
+
+### 14.10、copy方法和带名参数
+
+样例类的copy方法创建一个跟现有对象完全一样的新对象。可以在copy的时候指定属性名来修改新对象的属性。
+
+```scala
+val newCurr = curr.copy(unit = "new curr")
+println(newCurr)
+```
+
+### 14.11、case语句中的中置表示法（doing）
+
+如果unapply方法返回的是一个对偶，则可以将case语句按照中置表达式表示法来写：
+
+```scala
+object ch14_11 {
+  def main(args: Array[String]): Unit = {
+    val amt: Amount = Dollar(11.1)
+    amt match {
+      case a Currency u =>  s"$a,$u" // 等价于 case Currency(a,u)
+    }
+  }
+
+}
+```
+
+
+
+### 14.12、匹配嵌套结构
+
+模式匹配可以匹配到特定的嵌套：
+
+```scala
+package cm.uestc.edu.scalaimpatient.ch14
+
+object ch14_12 {
+  def main(args: Array[String]): Unit = {
+    val bundle = Bundle("outer", 11.22,
+      Article("scala", 22.33),
+      Bundle("inner", 10.0,
+        Article("fast scala", 11.11),
+        Article("deep java", 22.22))
+    )
+    val str = bundle match {
+      // case Bundle(_, _, Article(desc, _), _*) => s"$desc" // 将desc绑定到Bundle的第一个article上
+      case Bundle(_, _, art@Article(_, _), rest@_*) => s"${art.desc}" // 将art绑定到Bundle的第一个article上 ,将剩下的绑定到rest上
+    }
+    println(str)
+  }
+}
+
+abstract class Item
+
+case class Article(desc: String, price: Double) extends Item
+
+case class Bundle(desc: String, price: Double, items: Item*) extends Item
+
+```
+
+### 14.13、样例类是邪恶的吗
+
+样例类适用于标记不会更改的类。
+
+### 14.14、密封类
+
+用样例类做模式匹配时，如果想要确保自己已经列出了所有可能的选择，则需要将样例类的超了声明为 `sealed`——密封类。
+
+密封类要求所有样例类必须在 密封类所在的文件中。
+
+### 14.15、模拟枚举
+
+样例类的作用之一是：在Scala中模拟出枚举的效果。
+
+```scala
+object ch14_15 {
+  def main(args: Array[String]): Unit = {
+    val color:TrafficLightColor = Red
+
+    val str = color match {
+      case Red => "Red"
+      case Green => "Green"
+      case Yellow => "Yellow"
+    }
+    println(str)
+  }
+}
+
+
+sealed abstract class TrafficLightColor
+
+case object Red extends TrafficLightColor
+case object Green extends TrafficLightColor
+case object Yellow extends TrafficLightColor
+```
+
+### 14.16、Option类型
+
+Option用样例类表示就是可能存在 可能也不存在的值。即Some[T] 和 None
+
+Map.get 方法 返回的是就是一个Option， 处理Option：
+
+```scala
+object ch14_16 {
+  def main(args: Array[String]): Unit = {
+    val map = Map(1 -> 1, 2 -> 2)
+    val opt: Option[Int] = map.get(1)
+    opt match {
+      case Some(value) => println(value)
+      case None => println("no score")
+    }
+
+    if (opt.isEmpty) println("no score") else println(opt.get)
+
+    println(opt.getOrElse("no score")) // 推荐使用
+
+    for (ele <- opt) println(ele)
+  }
+
+}
+```
+
+Option 还可以接 filter map等方法，调用的前提是 不是None
+
+### 14.17、偏函数
+
+被包在花括号内的一组case语句是一个**偏函数**(partial func)——一个并非对所有输入值都有定义的函数。
+
+偏函数是 `PartitialFunction[A,B]`的一个实例（A是参数，B是返回值），包含两个方法：
+
+- `apply`：从匹配到的模式计算返回值
+- `isDefinedAt`：在输入至少匹配其中一个模式时返回true
+
+```scala
+object ch14_17 {
+  def main(args: Array[String]): Unit = {
+    val f:PartialFunction[Char, Int] = {
+      case '+' => 1;
+      case '-' => -1;
+    }
+    println(f('-')) // -1
+    println(f('+')) // 1
+    println(f('*')) // matchError
+    println(f.isDefinedAt('+')) // true
+    println(f.isDefinedAt('*')) // false
+  }
+
+}
+```
+
+偏函数表达式必须是在一个编译器能够推断出返回类型的上下文里。当将偏函数赋值给一个有类型的变量 或者 作为参数传递时，就属于这种场景。
+
+**PartitialFunction 和 Function**：
+
+- PartitialFunction[P, R].list 方法，将转换成Funciton 类型是：(P) => (R)
+- Function.unlift 方法将转换成偏函数
+
+> try {} catch {} 中的catch其实就是一个偏函数。
+
+## 15、注解（doing）
+
+### 15.1、什么是注解
+
+### 15.2、什么可以被注解
+
+和Java一样：类、方法、字段、局部变量、参数；可以同时多个注解，没有顺序要求
+
+### 15.3、注解参数
+
+### 15.4、注解实现
+
+### 15.5、针对Java特性的注解
+
+### 15.6、用于优化的注解
+
+### 15.7、用于错误和警告的注解
+
+## 16、XML处理（doing）
 
 ## 17、 Futrue
+
+### 17.1、在future中运行任务
+
+### 17.2、等待结果
+
+### 17.3、Try类
+
+### 17.4、回调
+
+### 17.5、组合future任务
+
+### 17.6、其他future变换
+
+### 17.7、Future对象中的方法
+
+### 17.8、Promise
+
+### 17.9、执行上下文
 
 ## 18、 类型参数
 
